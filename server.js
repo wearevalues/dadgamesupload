@@ -11,9 +11,11 @@ const port = process.env.PORT || 4173;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "password";
 const SESSION_SECRET = process.env.SESSION_SECRET || "replace-this-secret";
 
-const dataDir = path.join(__dirname, "data");
-const uploadsDir = path.join(__dirname, "uploads");
-const publicUploadsDir = path.join(__dirname, "public", "uploads");
+const isVercel = Boolean(process.env.VERCEL);
+const writableRoot = isVercel ? path.join(process.env.TMPDIR || "/tmp", "photo-uploader") : __dirname;
+const dataDir = path.join(writableRoot, "data");
+const uploadsDir = path.join(writableRoot, "uploads");
+const publicUploadsDir = path.join(writableRoot, "uploads-public");
 const settingsPath = path.join(dataDir, "settings.json");
 const submissionsCsvPath = path.join(dataDir, "submissions.csv");
 
@@ -213,11 +215,23 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: false
+      secure: isVercel || process.env.NODE_ENV === "production"
     }
   })
 );
 
+const storageReady = ensureStorage();
+
+app.use(async (_req, _res, next) => {
+  try {
+    await storageReady;
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use("/uploads", express.static(publicUploadsDir));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/settings", async (_req, res) => {
@@ -362,13 +376,17 @@ app.get("/admin", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin.html"));
 });
 
-ensureStorage()
-  .then(() => {
-    app.listen(port, () => {
-      console.log(`Server running at http://localhost:${port}`);
+if (isVercel) {
+  module.exports = app;
+} else {
+  storageReady
+    .then(() => {
+      app.listen(port, () => {
+        console.log(`Server running at http://localhost:${port}`);
+      });
+    })
+    .catch((error) => {
+      console.error("Failed to initialize storage:", error);
+      process.exit(1);
     });
-  })
-  .catch((error) => {
-    console.error("Failed to initialize storage:", error);
-    process.exit(1);
-  });
+}
