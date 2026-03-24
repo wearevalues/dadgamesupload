@@ -277,6 +277,10 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
     return res.status(400).json({ error: "No media files found." });
   }
 
+  if (!name || !city) {
+    return res.status(400).json({ error: "Your Name and Your City are required." });
+  }
+
   if (settings.destination.provider === "google-drive") {
     const folderId = settings.destination.driveFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
     if (!folderId) {

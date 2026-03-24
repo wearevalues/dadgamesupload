@@ -139,6 +139,8 @@ dropzone.addEventListener("drop", (event) => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!form.reportValidity()) return;
+
   if (!selectedFiles.length) {
     errorEl.textContent = "Please add at least one photo or video.";
     return;
@@ -147,6 +149,11 @@ form.addEventListener("submit", async (event) => {
   const formData = new FormData();
   const name = document.getElementById("nameInput").value.trim();
   const city = document.getElementById("cityInput").value.trim();
+
+  if (!name || !city) {
+    errorEl.textContent = "Your Name and Your City are required.";
+    return;
+  }
 
   selectedFiles.forEach((file) => formData.append("media", file));
   formData.append("name", name);
