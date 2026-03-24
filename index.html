@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Share Your Media</title>
+    <style>
+      :root {
+        --bg: #e8e8e8;
+        --panel: #f1f1f1;
+        --panel-border: #d8d8d8;
+        --input-bg: #ebebeb;
+        --text: #323232;
+        --muted: #666666;
+        --button: #f7f7f7;
+        --button-text: #323232;
+        --accent: #6ea8fe;
+        --danger: #ff7b7b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: Arial, Helvetica, sans-serif;
+        font-weight: 700;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+      }
+
+      .page {
+        width: 100%;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 32px 16px;
+      }
+
+      .card {
+        position: relative;
+        width: min(100%, 700px);
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        border-radius: 14px;
+        padding: clamp(18px, 2.5vw, 32px);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+        overflow: hidden;
+      }
+
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.18;
+        background-image:
+          radial-gradient(circle at 20% 20%, rgba(0, 0, 0, 0.18) 0.5px, transparent 0.7px),
+          radial-gradient(circle at 80% 70%, rgba(0, 0, 0, 0.16) 0.5px, transparent 0.7px);
+        background-size: 3px 3px, 4px 4px;
+      }
+
+      .card > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.45rem, 2.1vw, 2rem);
+        line-height: 1.2;
+      }
+
+      .subhead {
+        margin: 8px 0 26px;
+        color: var(--muted);
+        font-size: clamp(0.96rem, 1.45vw, 1.1rem);
+      }
+
+      .field {
+        margin-bottom: 16px;
+      }
+
+      .field label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+
+      .input {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid #c9c9c9;
+        background: var(--input-bg);
+        color: var(--text);
+        padding: 14px 14px;
+        font-size: 1rem;
+        outline: none;
+      }
+
+      .input::placeholder {
+        color: #8a8a8a;
+      }
+
+      .input:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(110, 168, 254, 0.2);
+      }
+
+      .dropzone {
+        border: 2px dashed #bbbbbb;
+        border-radius: 12px;
+        background: #ebebeb;
+        padding: clamp(20px, 4vw, 34px) 16px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.2s ease, background 0.2s ease;
+      }
+
+      .dropzone:hover,
+      .dropzone:focus-visible {
+        border-color: var(--accent);
+        background: #f8f8f8;
+      }
+
+      .dropzone.dragging {
+        border-color: var(--accent);
+        background: #edf5ff;
+      }
+
+      .dropzone .icon {
+        font-size: 2rem;
+        line-height: 1;
+        margin-bottom: 10px;
+      }
+
+      .dropzone .hint {
+        color: var(--muted);
+        font-size: 1.02rem;
+      }
+
+      .dropzone .hint strong {
+        color: var(--text);
+      }
+
+      .preview {
+        margin-top: 14px;
+        border: 1px solid #c9c9c9;
+        border-radius: 10px;
+        min-height: 112px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        background: #ebebeb;
+      }
+
+      .preview p {
+        color: var(--muted);
+        margin: 0;
+        padding: 12px;
+        text-align: center;
+      }
+
+      .preview img,
+      .preview video {
+        width: 100%;
+        max-height: 280px;
+        object-fit: cover;
+      }
+
+      .selected-list {
+        margin: 10px 0 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 6px;
+      }
+
+      .selected-list li {
+        background: #ffffff;
+        border: 1px solid #d0d0d0;
+        border-radius: 8px;
+        padding: 8px 10px;
+        color: var(--text);
+        font-size: 0.92rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .error {
+        color: var(--danger);
+        font-size: 0.9rem;
+        margin-top: 8px;
+        min-height: 1.2em;
+      }
+
+      .submit {
+        margin-top: 18px;
+        width: 100%;
+        border: 1px solid #c4c4c4;
+        border-radius: 18px;
+        padding: 14px 18px;
+        font-size: 1.06rem;
+        font-weight: 600;
+        color: var(--button-text);
+        background: var(--button);
+        cursor: pointer;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.9),
+          0 2px 5px rgba(0, 0, 0, 0.08);
+        transition: opacity 0.2s ease, background 0.2s ease, transform 0.08s ease;
+      }
+
+      .submit:hover:not(:disabled) {
+        background: #efefef;
+      }
+
+      .submit:active:not(:disabled) {
+        transform: translateY(1px);
+      }
+
+      .submit:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .status {
+        margin-top: 10px;
+        min-height: 1.2em;
+        color: #9cd4a2;
+        font-size: 0.92rem;
+      }
+
+      @media (max-width: 600px) {
+        .page {
+          padding: 14px 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <section class="card" aria-labelledby="title">
+        <h1 id="title">Share Your Media</h1>
+        <p class="subhead">Capture your moments and share it with us.</p>
+
+        <form id="uploadForm">
+          <div class="field">
+            <label for="mediaInput">Photo or Video</label>
+            <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-controls="mediaInput">
+              <div class="icon">↑</div>
+              <p class="hint"><strong>Tap, click, or drag files here</strong><br />Supports photos and videos</p>
+            </div>
+            <input id="mediaInput" type="file" accept="image/*,video/*" multiple hidden />
+            <div id="preview" class="preview">
+              <p>No media selected yet.</p>
+            </div>
+            <ul id="selectedList" class="selected-list" aria-live="polite"></ul>
+            <div id="error" class="error" aria-live="polite"></div>
+          </div>
+
+          <div class="field">
+            <label for="nameInput">Add Your Name</label>
+            <input id="nameInput" class="input" type="text" placeholder="Enter your name" />
+          </div>
+
+          <div class="field">
+            <label for="cityInput">Add Your City</label>
+            <input id="cityInput" class="input" type="text" placeholder="Enter your city" />
+          </div>
+
+          <button class="submit" id="submitBtn" type="submit" disabled>Upload Media</button>
+          <p id="status" class="status" aria-live="polite"></p>
+        </form>
+      </section>
+    </main>
+
+    <script>
+      const dropzone = document.getElementById("dropzone");
+      const mediaInput = document.getElementById("mediaInput");
+      const preview = document.getElementById("preview");
+      const selectedList = document.getElementById("selectedList");
+      const errorEl = document.getElementById("error");
+      const statusEl = document.getElementById("status");
+      const submitBtn = document.getElementById("submitBtn");
+      const form = document.getElementById("uploadForm");
+
+      let selectedFiles = [];
+
+      const isSupportedMedia = (file) => file.type.startsWith("image/") || file.type.startsWith("video/");
+
+      function formatBytes(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        const units = ["KB", "MB", "GB"];
+        let size = bytes / 1024;
+        let unit = 0;
+        while (size >= 1024 && unit < units.length - 1) {
+          size /= 1024;
+          unit += 1;
+        }
+        return `${size.toFixed(1)} ${units[unit]}`;
+      }
+
+      function renderPreview() {
+        preview.innerHTML = "";
+        selectedList.innerHTML = "";
+        errorEl.textContent = "";
+        statusEl.textContent = "";
+
+        if (!selectedFiles.length) {
+          preview.innerHTML = "<p>No media selected yet.</p>";
+          submitBtn.disabled = true;
+          return;
+        }
+
+        submitBtn.disabled = false;
+        const firstFile = selectedFiles[0];
+        const objectUrl = URL.createObjectURL(firstFile);
+
+        if (firstFile.type.startsWith("image/")) {
+          const img = document.createElement("img");
+          img.src = objectUrl;
+          img.alt = "Selected image preview";
+          img.onload = () => URL.revokeObjectURL(objectUrl);
+          preview.appendChild(img);
+        } else {
+          const video = document.createElement("video");
+          video.src = objectUrl;
+          video.controls = true;
+          video.onloadeddata = () => URL.revokeObjectURL(objectUrl);
+          preview.appendChild(video);
+        }
+
+        selectedFiles.forEach((file) => {
+          const item = document.createElement("li");
+          item.textContent = `${file.name} (${formatBytes(file.size)})`;
+          selectedList.appendChild(item);
+        });
+      }
+
+      function setFiles(fileList) {
+        const incoming = Array.from(fileList);
+        const unsupported = incoming.filter((file) => !isSupportedMedia(file));
+
+        if (unsupported.length) {
+          errorEl.textContent = "Only image and video files are allowed.";
+        }
+
+        const validFiles = incoming.filter(isSupportedMedia);
+        if (!validFiles.length) return;
+
+        selectedFiles = validFiles;
+        renderPreview();
+      }
+
+      function openPicker() {
+        mediaInput.click();
+      }
+
+      dropzone.addEventListener("click", openPicker);
+      dropzone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openPicker();
+        }
+      });
+
+      mediaInput.addEventListener("change", (event) => {
+        if (event.target.files) setFiles(event.target.files);
+      });
+
+      ["dragenter", "dragover"].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropzone.classList.add("dragging");
+        });
+      });
+
+      ["dragleave", "drop"].forEach((eventName) => {
+        dropzone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropzone.classList.remove("dragging");
+        });
+      });
+
+      dropzone.addEventListener("drop", (event) => {
+        if (event.dataTransfer?.files) setFiles(event.dataTransfer.files);
+      });
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!selectedFiles.length) {
+          errorEl.textContent = "Please add at least one photo or video.";
+          return;
+        }
+
+        const formData = new FormData();
+        const name = document.getElementById("nameInput").value.trim();
+        const city = document.getElementById("cityInput").value.trim();
+
+        selectedFiles.forEach((file) => formData.append("media", file));
+        formData.append("name", name);
+        formData.append("city", city);
+
+        statusEl.textContent = `Ready to upload ${selectedFiles.length} file(s). Connect your API endpoint here.`;
+      });
+    </script>
+  </body>
+</html>

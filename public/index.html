@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Share Your Media</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <img id="brandLogoTop" class="brand-logo-top hidden" alt="Brand logo" />
+      <section class="card" aria-labelledby="title">
+        <div class="brand-row">
+          <div>
+            <h1 id="title">Share Your Media</h1>
+            <p id="subtitle" class="subhead">Capture your moments and share it with us.</p>
+          </div>
+        </div>
+
+        <form id="uploadForm">
+          <div class="field">
+            <label for="mediaInput">Photo or Video</label>
+            <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-controls="mediaInput">
+              <div class="icon">↑</div>
+              <p class="hint"><strong>Tap, click, or drag files here</strong><br />Supports photos and videos</p>
+            </div>
+            <input id="mediaInput" type="file" accept="image/*,video/*" multiple hidden />
+            <div id="preview" class="preview">
+              <p>No media selected yet.</p>
+            </div>
+            <ul id="selectedList" class="selected-list" aria-live="polite"></ul>
+            <div id="error" class="error" aria-live="polite"></div>
+          </div>
+
+          <div class="field">
+            <label for="nameInput">Add Your Name</label>
+            <input id="nameInput" class="input" type="text" placeholder="Enter your name" />
+          </div>
+
+          <div class="field">
+            <label for="cityInput">Add Your City</label>
+            <input id="cityInput" class="input" type="text" placeholder="Enter your city" />
+          </div>
+
+          <button class="submit" id="submitBtn" type="submit" disabled>
+            <span class="btn-text">Upload Media</span>
+            <span class="spinner hidden" aria-hidden="true"></span>
+          </button>
+          <p id="status" class="status" aria-live="polite"></p>
+        </form>
+      </section>
+    </main>
+
+    <script src="/uploader.js"></script>
+  </body>
+</html>

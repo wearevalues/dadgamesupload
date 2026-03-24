@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Uploader Admin</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="admin-mode">
+    <main class="page">
+      <section class="card admin-card">
+        <h1 class="admin-title">Admin</h1>
+        <p class="admin-subhead">Sign in to manage content.</p>
+
+        <form id="loginForm" class="admin-section">
+          <label for="password">Password</label>
+          <input id="password" class="input" type="password" placeholder="Enter password" />
+          <button class="submit admin-btn sign-in-btn" type="submit"><span class="btn-text">Sign in</span></button>
+        </form>
+
+        <form id="settingsForm" class="admin-section hidden">
+          <div class="admin-field">
+            <label>Header</label>
+            <input id="titleInput" class="input" type="text" />
+          </div>
+          <div class="admin-field">
+            <label>Subhead</label>
+            <input id="subtitleInput" class="input" type="text" />
+          </div>
+          <div class="admin-field">
+            <label>Logo Upload</label>
+          </div>
+          <div id="logoDropzone" class="dropzone logo-dropzone" tabindex="0" role="button" aria-controls="logoFileInput">
+            <div class="icon">↑</div>
+            <p class="hint"><strong>Drag logo here or click to upload</strong><br />PNG, JPG, SVG, WEBP</p>
+          </div>
+          <input id="logoFileInput" type="file" accept="image/*,.svg" hidden />
+          <div id="logoUploadStatus" class="status"></div>
+
+          <div class="color-grid">
+            <label>Background Color <input id="bgColorInput" class="input" type="text" /></label>
+            <label>Box Color <input id="cardColorInput" class="input" type="text" /></label>
+            <label>Surface Color <input id="surfaceColorInput" class="input" type="text" /></label>
+            <label>Text Color <input id="textColorInput" class="input" type="text" /></label>
+          </div>
+
+          <h2>Destination</h2>
+          <div class="admin-field">
+            <label>Provider</label>
+            <input class="input" type="text" value="Google Drive" readonly />
+          </div>
+          <div class="admin-field">
+            <label>Google Drive Folder ID</label>
+            <input id="driveFolderIdInput" class="input" type="text" placeholder="Drive folder ID (for google-drive provider)" />
+          </div>
+          <div class="admin-field">
+            <label>Webhook URL (optional integration endpoint)</label>
+            <input id="webhookInput" class="input" type="url" placeholder="https://api.example.com/upload" />
+          </div>
+
+          <button class="submit admin-btn" type="submit"><span class="btn-text">Save Settings</span></button>
+        </form>
+
+        <p id="adminStatus" class="status"></p>
+        <p class="tiny-note"><a href="/" class="back-link">+ Back to uploader</a></p>
+      </section>
+    </main>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>
