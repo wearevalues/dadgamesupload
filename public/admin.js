@@ -60,6 +60,7 @@ async function showSettingsIfAuthenticated() {
   } catch {
     loginForm.classList.remove("hidden");
     settingsForm.classList.add("hidden");
+    setStatus("Could not load settings. Try signing in again.", true);
   }
 }
 

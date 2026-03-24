@@ -1,5 +1,5 @@
 const express = require("express");
-const session = require("express-session");
+const cookieSession = require("cookie-session");
 const multer = require("multer");
 const fs = require("fs");
 const fsp = require("fs/promises");
@@ -7,6 +7,7 @@ const path = require("path");
 const { google } = require("googleapis");
 
 const app = express();
+app.set("trust proxy", 1);
 const port = process.env.PORT || 4173;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "password";
 const SESSION_SECRET = process.env.SESSION_SECRET || "replace-this-secret";
@@ -208,15 +209,14 @@ const logoUpload = multer({
 
 app.use(express.json({ limit: "5mb" }));
 app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: isVercel || process.env.NODE_ENV === "production"
-    }
+  cookieSession({
+    name: "session",
+    keys: [SESSION_SECRET],
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isVercel || process.env.NODE_ENV === "production",
+    path: "/"
   })
 );
 
@@ -249,7 +249,8 @@ app.post("/api/admin/login", (req, res) => {
 });
 
 app.post("/api/admin/logout", (req, res) => {
-  req.session.destroy(() => res.json({ ok: true }));
+  req.session = null;
+  return res.json({ ok: true });
 });
 
 app.get("/api/admin/settings", requireAdmin, async (_req, res) => {
