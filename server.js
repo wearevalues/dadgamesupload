@@ -54,23 +54,88 @@ async function ensureStorage() {
   }
 }
 
-async function readSettings() {
-  try {
-    const raw = await fsp.readFile(settingsPath, "utf8");
-    const parsed = JSON.parse(raw);
-    return {
-      ...defaultSettings,
-      ...parsed,
-      branding: { ...defaultSettings.branding, ...(parsed.branding || {}) },
-      destination: { ...defaultSettings.destination, ...(parsed.destination || {}) }
-    };
-  } catch {
-    return defaultSettings;
+function mergeEnvIntoSettings(settings) {
+  const out = {
+    ...settings,
+    branding: { ...settings.branding },
+    destination: { ...settings.destination }
+  };
+  const pick = (v) => (v != null && String(v).trim() !== "" ? String(v).trim() : null);
+  if (pick(process.env.BRANDING_LOGO_URL)) out.branding.logoUrl = pick(process.env.BRANDING_LOGO_URL);
+  if (pick(process.env.BRANDING_TITLE)) out.branding.title = pick(process.env.BRANDING_TITLE);
+  if (pick(process.env.BRANDING_SUBTITLE)) out.branding.subtitle = pick(process.env.BRANDING_SUBTITLE);
+  if (pick(process.env.BRANDING_BACKGROUND_COLOR)) out.branding.backgroundColor = pick(process.env.BRANDING_BACKGROUND_COLOR);
+  if (pick(process.env.BRANDING_CARD_COLOR)) out.branding.cardColor = pick(process.env.BRANDING_CARD_COLOR);
+  if (pick(process.env.BRANDING_SURFACE_COLOR)) out.branding.surfaceColor = pick(process.env.BRANDING_SURFACE_COLOR);
+  if (pick(process.env.BRANDING_TEXT_COLOR)) out.branding.textColor = pick(process.env.BRANDING_TEXT_COLOR);
+  if (pick(process.env.GOOGLE_DRIVE_FOLDER_ID)) {
+    out.destination.driveFolderId = pick(process.env.GOOGLE_DRIVE_FOLDER_ID);
   }
+  return out;
+}
+
+async function readSettingsBlob() {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) return null;
+  try {
+    const { list } = require("@vercel/blob");
+    const { blobs } = await list({ prefix: "media-uploader/settings/", token });
+    const jsonBlobs = blobs.filter((b) => b.pathname.endsWith(".json"));
+    if (!jsonBlobs.length) return null;
+    jsonBlobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+    const res = await fetch(jsonBlobs[0].url);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function writeSettingsBlob(payload) {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) return;
+  try {
+    const { put, list, del } = require("@vercel/blob");
+    const prefix = "media-uploader/settings/";
+    const { blobs } = await list({ prefix, token });
+    for (const b of blobs) {
+      await del(b.url, { token });
+    }
+    await put(`${prefix}site-settings.json`, JSON.stringify(payload), {
+      access: "public",
+      addRandomSuffix: false,
+      token
+    });
+  } catch (err) {
+    console.error("writeSettingsBlob:", err.message);
+  }
+}
+
+async function readSettings() {
+  let parsed = null;
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    parsed = await readSettingsBlob();
+  }
+  if (!parsed) {
+    try {
+      const raw = await fsp.readFile(settingsPath, "utf8");
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = {};
+    }
+  }
+  const merged = {
+    ...defaultSettings,
+    ...parsed,
+    branding: { ...defaultSettings.branding, ...(parsed.branding || {}) },
+    destination: { ...defaultSettings.destination, ...(parsed.destination || {}) }
+  };
+  return mergeEnvIntoSettings(merged);
 }
 
 async function writeSettings(next) {
   await fsp.writeFile(settingsPath, JSON.stringify(next, null, 2), "utf8");
+  await writeSettingsBlob(next);
 }
 
 function sanitizePart(value) {
@@ -267,12 +332,30 @@ app.post("/api/admin/settings", requireAdmin, async (req, res) => {
     destination: { ...defaultSettings.destination, ...(payload.destination || {}) }
   };
   await writeSettings(nextSettings);
-  res.json({ ok: true, settings: nextSettings });
+  const settings = await readSettings();
+  res.json({ ok: true, settings });
 });
 
-app.post("/api/admin/logo", requireAdmin, logoUpload.single("logo"), (req, res) => {
+app.post("/api/admin/logo", requireAdmin, logoUpload.single("logo"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No logo file uploaded." });
+  }
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (token) {
+    try {
+      const { put } = require("@vercel/blob");
+      const buffer = await fsp.readFile(req.file.path);
+      await fsp.unlink(req.file.path).catch(() => {});
+      const ext = path.extname(req.file.originalname || "").toLowerCase() || ".png";
+      const { url } = await put(`media-uploader/brand/logo-${Date.now()}${ext}`, buffer, {
+        access: "public",
+        addRandomSuffix: false,
+        token
+      });
+      return res.json({ ok: true, logoUrl: url });
+    } catch (err) {
+      return res.status(500).json({ error: `Logo upload failed: ${err.message}` });
+    }
   }
   const logoUrl = `/uploads/${req.file.filename}`;
   return res.json({ ok: true, logoUrl });
