@@ -15,6 +15,7 @@ const dataDir = path.join(__dirname, "data");
 const uploadsDir = path.join(__dirname, "uploads");
 const publicUploadsDir = path.join(__dirname, "public", "uploads");
 const settingsPath = path.join(dataDir, "settings.json");
+const submissionsCsvPath = path.join(dataDir, "submissions.csv");
 
 const defaultSettings = {
   branding: {
@@ -41,6 +42,13 @@ async function ensureStorage() {
   if (!fs.existsSync(settingsPath)) {
     await fsp.writeFile(settingsPath, JSON.stringify(defaultSettings, null, 2), "utf8");
   }
+  if (!fs.existsSync(submissionsCsvPath)) {
+    await fsp.writeFile(
+      submissionsCsvPath,
+      "timestamp,name,city,destination,file_count,file_names,file_refs\n",
+      "utf8"
+    );
+  }
 }
 
 async function readSettings() {
@@ -60,6 +68,36 @@ async function readSettings() {
 
 async function writeSettings(next) {
   await fsp.writeFile(settingsPath, JSON.stringify(next, null, 2), "utf8");
+}
+
+function sanitizePart(value) {
+  return (value || "")
+    .toString()
+    .trim()
+    .replace(/[^\w-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 40);
+}
+
+function csvEscape(value) {
+  const str = value == null ? "" : String(value);
+  return `"${str.replace(/"/g, "\"\"")}"`;
+}
+
+async function appendSubmissionCsv(entry) {
+  const row = [
+    entry.timestamp,
+    entry.name,
+    entry.city,
+    entry.destination,
+    entry.fileCount,
+    entry.fileNames.join("|"),
+    entry.fileRefs.join("|")
+  ]
+    .map(csvEscape)
+    .join(",");
+
+  await fsp.appendFile(submissionsCsvPath, `${row}\n`, "utf8");
 }
 
 function resolveServiceAccount() {
@@ -94,11 +132,11 @@ function getDriveClient() {
   return google.drive({ version: "v3", auth });
 }
 
-async function uploadFileToGoogleDrive(file, folderId) {
+async function uploadFileToGoogleDrive(file, folderId, targetName) {
   const drive = getDriveClient();
   const response = await drive.files.create({
     requestBody: {
-      name: file.originalname,
+      name: targetName,
       parents: [folderId]
     },
     media: {
@@ -228,6 +266,12 @@ app.post("/api/admin/logo", requireAdmin, logoUpload.single("logo"), (req, res) 
 app.post("/api/upload", upload.array("media", 10), async (req, res) => {
   const settings = await readSettings();
   const files = req.files || [];
+  const name = (req.body?.name || "").trim();
+  const city = (req.body?.city || "").trim();
+  const timestamp = new Date().toISOString();
+  const safeName = sanitizePart(name) || "anon";
+  const safeCity = sanitizePart(city) || "unknown";
+  const uploadToken = Date.now();
 
   if (!files.length) {
     return res.status(400).json({ error: "No media files found." });
@@ -243,8 +287,10 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
 
     try {
       const uploaded = [];
-      for (const file of files) {
-        const driveFile = await uploadFileToGoogleDrive(file, folderId);
+      for (const [index, file] of files.entries()) {
+        const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
+        const targetName = `${safeCity}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
+        const driveFile = await uploadFileToGoogleDrive(file, folderId, targetName);
         uploaded.push({
           id: driveFile.id,
           name: driveFile.name,
@@ -254,6 +300,16 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
           webContentLink: driveFile.webContentLink || null
         });
       }
+
+      await appendSubmissionCsv({
+        timestamp,
+        name,
+        city,
+        destination: "google-drive",
+        fileCount: uploaded.length,
+        fileNames: uploaded.map((f) => f.name),
+        fileRefs: uploaded.map((f) => f.id)
+      });
 
       return res.json({
         ok: true,
@@ -268,16 +324,33 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
     }
   }
 
+  const localFiles = files.map((file, index) => {
+    const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
+    const renamed = `${safeCity}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
+    return {
+      filename: file.filename,
+      originalName: file.originalname,
+      storedAs: renamed,
+      size: file.size,
+      mimeType: file.mimetype
+    };
+  });
+
+  await appendSubmissionCsv({
+    timestamp,
+    name,
+    city,
+    destination: settings.destination.provider,
+    fileCount: localFiles.length,
+    fileNames: localFiles.map((f) => f.storedAs),
+    fileRefs: localFiles.map((f) => f.filename)
+  });
+
   return res.json({
     ok: true,
     destination: settings.destination.provider,
-    fileCount: files.length,
-    files: files.map((file) => ({
-      filename: file.filename,
-      originalName: file.originalname,
-      size: file.size,
-      mimeType: file.mimetype
-    }))
+    fileCount: localFiles.length,
+    files: localFiles
   });
 });
 
