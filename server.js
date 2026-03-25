@@ -68,8 +68,10 @@ function mergeEnvIntoSettings(settings) {
   if (pick(process.env.BRANDING_CARD_COLOR)) out.branding.cardColor = pick(process.env.BRANDING_CARD_COLOR);
   if (pick(process.env.BRANDING_SURFACE_COLOR)) out.branding.surfaceColor = pick(process.env.BRANDING_SURFACE_COLOR);
   if (pick(process.env.BRANDING_TEXT_COLOR)) out.branding.textColor = pick(process.env.BRANDING_TEXT_COLOR);
-  if (pick(process.env.GOOGLE_DRIVE_FOLDER_ID)) {
-    out.destination.driveFolderId = pick(process.env.GOOGLE_DRIVE_FOLDER_ID);
+  const envFolder = pick(process.env.GOOGLE_DRIVE_FOLDER_ID);
+  const savedFolder = pick(out.destination.driveFolderId);
+  if (envFolder && !savedFolder) {
+    out.destination.driveFolderId = envFolder;
   }
   return out;
 }
