@@ -38,8 +38,11 @@
           </div>
 
           <div class="field">
-            <label for="cityInput">Your City</label>
-            <input id="cityInput" class="input" type="text" name="city" autocomplete="address-level2" required />
+            <label for="projectSelect">Project</label>
+            <select id="projectSelect" class="input" name="project" required>
+              <option value="" selected disabled>Select a project</option>
+            </select>
+            <input id="projectCustomInput" class="input hidden" type="text" placeholder="Type project name" />
           </div>
 
           <button class="submit" id="submitBtn" type="submit" disabled>

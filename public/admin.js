@@ -5,6 +5,9 @@ const logoDropzone = document.getElementById("logoDropzone");
 const logoFileInput = document.getElementById("logoFileInput");
 const logoUploadStatus = document.getElementById("logoUploadStatus");
 let currentLogoUrl = "";
+const projectAddInput = document.getElementById("projectAddInput");
+const addProjectBtn = document.getElementById("addProjectBtn");
+const projectList = document.getElementById("projectList");
 
 function setStatus(message, isError = false) {
   adminStatus.textContent = message;
@@ -44,6 +47,61 @@ function hydrateForm(settings) {
   document.getElementById("webhookInput").value = destination.webhookUrl || "";
 }
 
+function renderProjects(projects) {
+  const list = Array.isArray(projects) ? projects : [];
+  projectList.innerHTML = "";
+  if (!list.length) {
+    const empty = document.createElement("li");
+    empty.className = "project-empty";
+    empty.textContent = "No projects yet.";
+    projectList.appendChild(empty);
+    return;
+  }
+
+  list.forEach((p) => {
+    const name = String(p || "").trim();
+    if (!name) return;
+    const li = document.createElement("li");
+    li.className = "project-pill";
+    li.style.display = "flex";
+    li.style.alignItems = "center";
+    li.style.justifyContent = "space-between";
+    li.style.gap = "12px";
+
+    const span = document.createElement("span");
+    span.textContent = name;
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "project-delete-btn";
+    btn.textContent = "Delete";
+    btn.addEventListener("click", async () => {
+      const ok = confirm(`Delete project "${name}"?`);
+      if (!ok) return;
+
+      try {
+        setStatus("Deleting project...");
+        const res = await fetch("/api/admin/projects/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project: name })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Could not delete project.");
+
+        renderProjects(data.projects || []);
+        setStatus("Project deleted.");
+      } catch (error) {
+        setStatus(error.message || "Could not delete project.", true);
+      }
+    });
+
+    li.appendChild(span);
+    li.appendChild(btn);
+    projectList.appendChild(li);
+  });
+}
+
 async function fetchAdminSettings() {
   const res = await fetch("/api/admin/settings");
   if (!res.ok) throw new Error("Please unlock the control panel.");
@@ -54,6 +112,7 @@ async function showSettingsIfAuthenticated() {
   try {
     const settings = await fetchAdminSettings();
     hydrateForm(settings);
+    renderProjects(settings.projects);
     loginForm.classList.add("hidden");
     settingsForm.classList.remove("hidden");
     setStatus("Panel unlocked.");
@@ -161,4 +220,29 @@ logoFileInput.addEventListener("change", (event) => {
 logoDropzone.addEventListener("drop", (event) => {
   const file = event.dataTransfer?.files?.[0];
   if (file) uploadLogoFile(file);
+});
+
+addProjectBtn.addEventListener("click", async () => {
+  const value = (projectAddInput?.value || "").trim();
+  if (!value) {
+    setStatus("Enter a project name.", true);
+    return;
+  }
+
+  setStatus("Adding project...");
+  try {
+    const res = await fetch("/api/admin/projects/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: value })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not add project.");
+
+    renderProjects(data.projects);
+    projectAddInput.value = "";
+    setStatus("Project added.");
+  } catch (error) {
+    setStatus(error.message || "Could not add project.", true);
+  }
 });

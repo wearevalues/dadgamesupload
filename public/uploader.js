@@ -10,6 +10,10 @@ const spinner = submitBtn.querySelector(".spinner");
 const titleEl = document.getElementById("title");
 const subtitleEl = document.getElementById("subtitle");
 const logoEl = document.getElementById("brandLogoTop");
+const projectSelect = document.getElementById("projectSelect");
+const projectCustomInput = document.getElementById("projectCustomInput");
+
+const customProjectValue = "__custom__";
 
 let selectedFiles = [];
 
@@ -50,11 +54,51 @@ function applyBranding(settings) {
   }
 }
 
+function renderProjects(projects) {
+  const list = Array.isArray(projects) ? projects : [];
+
+  projectSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  placeholder.textContent = "Select a project";
+  projectSelect.appendChild(placeholder);
+
+  list.forEach((p) => {
+    const name = String(p || "").trim();
+    if (!name) return;
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    projectSelect.appendChild(opt);
+  });
+
+  const other = document.createElement("option");
+  other.value = customProjectValue;
+  other.textContent = "Other (type below)";
+  projectSelect.appendChild(other);
+
+  syncProjectUI();
+}
+
+function syncProjectUI() {
+  if (projectSelect.value === customProjectValue) {
+    projectCustomInput.classList.remove("hidden");
+    projectCustomInput.disabled = false;
+  } else {
+    projectCustomInput.classList.add("hidden");
+    projectCustomInput.disabled = true;
+    projectCustomInput.value = "";
+  }
+}
+
 async function loadSettings() {
   try {
     const res = await fetch("/api/settings");
     const settings = await res.json();
     applyBranding(settings);
+    renderProjects(settings.projects);
   } catch {
     // keep defaults if settings load fails
   }
@@ -148,16 +192,22 @@ form.addEventListener("submit", async (event) => {
 
   const formData = new FormData();
   const name = document.getElementById("nameInput").value.trim();
-  const city = document.getElementById("cityInput").value.trim();
+  const projectChoice = projectSelect.value;
+  const project = projectChoice === customProjectValue ? projectCustomInput.value.trim() : projectChoice;
 
-  if (!name || !city) {
-    errorEl.textContent = "Your Name and Your City are required.";
+  if (!name) {
+    errorEl.textContent = "Your Name is required.";
+    return;
+  }
+
+  if (!project) {
+    errorEl.textContent = "Project is required.";
     return;
   }
 
   selectedFiles.forEach((file) => formData.append("media", file));
   formData.append("name", name);
-  formData.append("city", city);
+  formData.append("project", project);
 
   setLoading(true);
   statusEl.textContent = "Uploading...";
@@ -181,4 +231,5 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
+projectSelect.addEventListener("change", syncProjectUI);
 loadSettings();

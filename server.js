@@ -35,7 +35,8 @@ const defaultSettings = {
     driveFolderId: "",
     webhookUrl: "",
     note: "Use local while building. Add API integration credentials for cloud providers."
-  }
+  },
+  projects: []
 };
 
 async function ensureStorage() {
@@ -158,7 +159,7 @@ async function appendSubmissionCsv(entry) {
   const row = [
     entry.timestamp,
     entry.name,
-    entry.city,
+    entry.city || "",
     entry.destination,
     entry.fileCount,
     entry.fileNames.join("|"),
@@ -218,6 +219,48 @@ async function uploadFileToGoogleDrive(file, folderId, targetName) {
   });
 
   return response.data;
+}
+
+function sanitizeDriveFolderName(value) {
+  return (value || "")
+    .toString()
+    .trim()
+    .replace(/[\/\\]/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 80);
+}
+
+function escapeDriveQueryString(value) {
+  // Drive query strings are wrapped in single quotes, so escape any single quotes.
+  return (value || "").toString().replace(/'/g, "\\'");
+}
+
+async function getOrCreateDriveFolder(parentFolderId, folderName) {
+  const drive = getDriveClient();
+  const folderQuery = `name='${escapeDriveQueryString(folderName)}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`;
+
+  const listRes = await drive.files.list({
+    q: folderQuery,
+    fields: "files(id,name)",
+    pageSize: 10,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true
+  });
+
+  const existing = listRes.data.files && listRes.data.files[0];
+  if (existing && existing.id) return existing.id;
+
+  const createRes = await drive.files.create({
+    requestBody: {
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentFolderId]
+    },
+    fields: "id",
+    supportsAllDrives: true
+  });
+
+  return createRes.data.id;
 }
 
 function requireAdmin(req, res, next) {
@@ -327,11 +370,13 @@ app.get("/api/admin/settings", requireAdmin, async (_req, res) => {
 
 app.post("/api/admin/settings", requireAdmin, async (req, res) => {
   const payload = req.body || {};
+  const currentSettings = await readSettings();
   const nextSettings = {
     ...defaultSettings,
     ...payload,
     branding: { ...defaultSettings.branding, ...(payload.branding || {}) },
-    destination: { ...defaultSettings.destination, ...(payload.destination || {}) }
+    destination: { ...defaultSettings.destination, ...(payload.destination || {}) },
+    projects: Array.isArray(payload.projects) ? payload.projects : currentSettings.projects || defaultSettings.projects
   };
   await writeSettings(nextSettings);
   const settings = await readSettings();
@@ -363,22 +408,65 @@ app.post("/api/admin/logo", requireAdmin, logoUpload.single("logo"), async (req,
   return res.json({ ok: true, logoUrl });
 });
 
+app.post("/api/admin/projects/add", requireAdmin, async (req, res) => {
+  const projectRaw = (req.body?.project || "").trim();
+  if (!projectRaw) {
+    return res.status(400).json({ error: "Project is required." });
+  }
+
+  const current = await readSettings();
+  const existing = Array.isArray(current.projects) ? current.projects : [];
+
+  const normalized = projectRaw.toLowerCase();
+  const alreadyExists = existing.some((p) => String(p || "").toLowerCase() === normalized);
+  if (alreadyExists) {
+    return res.json({ ok: true, projects: existing });
+  }
+
+  const nextProjects = [...existing, projectRaw].slice(0, 200);
+  const nextSettings = { ...current, projects: nextProjects };
+
+  await writeSettings(nextSettings);
+  const updated = await readSettings();
+  return res.json({ ok: true, projects: updated.projects || [] });
+});
+
+app.post("/api/admin/projects/delete", requireAdmin, async (req, res) => {
+  const projectRaw = (req.body?.project || "").trim();
+  if (!projectRaw) {
+    return res.status(400).json({ error: "Project is required." });
+  }
+
+  const current = await readSettings();
+  const existing = Array.isArray(current.projects) ? current.projects : [];
+  const normalized = projectRaw.toLowerCase();
+
+  const nextProjects = existing.filter((p) => String(p || "").toLowerCase() !== normalized);
+  const nextSettings = { ...current, projects: nextProjects.slice(0, 200) };
+
+  await writeSettings(nextSettings);
+  const updated = await readSettings();
+  return res.json({ ok: true, projects: updated.projects || [] });
+});
+
 app.post("/api/upload", upload.array("media", 10), async (req, res) => {
   const settings = await readSettings();
   const files = req.files || [];
   const name = (req.body?.name || "").trim();
-  const city = (req.body?.city || "").trim();
+  const project = (req.body?.project || "").trim();
   const timestamp = new Date().toISOString();
   const safeName = sanitizePart(name) || "anon";
-  const safeCity = sanitizePart(city) || "unknown";
   const uploadToken = Date.now();
 
   if (!files.length) {
     return res.status(400).json({ error: "No media files found." });
   }
 
-  if (!name || !city) {
-    return res.status(400).json({ error: "Your Name and Your City are required." });
+  if (!name) {
+    return res.status(400).json({ error: "Your Name is required." });
+  }
+  if (!project) {
+    return res.status(400).json({ error: "Project is required." });
   }
 
   if (settings.destination.provider === "google-drive") {
@@ -391,10 +479,13 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
 
     try {
       const uploaded = [];
+      const projectFolderName = sanitizeDriveFolderName(project);
+      const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+      const safeProjectPart = sanitizePart(projectFolderName) || "project";
       for (const [index, file] of files.entries()) {
         const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
-        const targetName = `${safeCity}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
-        const driveFile = await uploadFileToGoogleDrive(file, folderId, targetName);
+        const targetName = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
+        const driveFile = await uploadFileToGoogleDrive(file, projectFolderId, targetName);
         uploaded.push({
           id: driveFile.id,
           name: driveFile.name,
@@ -408,7 +499,7 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
       await appendSubmissionCsv({
         timestamp,
         name,
-        city,
+        city: "",
         destination: "google-drive",
         fileCount: uploaded.length,
         fileNames: uploaded.map((f) => f.name),
@@ -419,6 +510,7 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
         ok: true,
         destination: "google-drive",
         fileCount: uploaded.length,
+        project: projectFolderName,
         files: uploaded
       });
     } catch (error) {
@@ -428,9 +520,12 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
     }
   }
 
+  const projectFolderName = sanitizeDriveFolderName(project);
+  const safeProjectPart = sanitizePart(projectFolderName) || "project";
+
   const localFiles = files.map((file, index) => {
     const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
-    const renamed = `${safeCity}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
+    const renamed = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
     return {
       filename: file.filename,
       originalName: file.originalname,
@@ -443,7 +538,7 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
   await appendSubmissionCsv({
     timestamp,
     name,
-    city,
+    city: "",
     destination: settings.destination.provider,
     fileCount: localFiles.length,
     fileNames: localFiles.map((f) => f.storedAs),
@@ -454,6 +549,7 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
     ok: true,
     destination: settings.destination.provider,
     fileCount: localFiles.length,
+    project: projectFolderName,
     files: localFiles
   });
 });
