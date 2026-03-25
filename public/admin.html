@@ -53,6 +53,15 @@
             <label>Google Drive Folder ID</label>
             <input id="driveFolderIdInput" class="input" type="text" placeholder="Drive folder ID (for google-drive provider)" />
           </div>
+
+          <h2>Projects</h2>
+          <div class="admin-field">
+            <label>Project name</label>
+            <input id="projectAddInput" class="input" type="text" placeholder="Project name" />
+          </div>
+          <button id="addProjectBtn" class="submit admin-btn" type="button"><span class="btn-text">Add Project</span></button>
+          <ul id="projectList" class="project-list" aria-live="polite"></ul>
+
           <div class="admin-field">
             <label>Webhook URL (optional integration endpoint)</label>
             <input id="webhookInput" class="input" type="url" placeholder="https://api.example.com/upload" />
