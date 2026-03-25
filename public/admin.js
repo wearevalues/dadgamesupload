@@ -27,8 +27,7 @@ function buildSettingsPayload() {
     },
     destination: {
       provider: "google-drive",
-      driveFolderId: document.getElementById("driveFolderIdInput").value.trim(),
-      webhookUrl: document.getElementById("webhookInput").value.trim()
+      driveFolderId: document.getElementById("driveFolderIdInput").value.trim()
     }
   };
 }
@@ -44,7 +43,6 @@ function hydrateForm(settings) {
   document.getElementById("surfaceColorInput").value = branding.surfaceColor || "#ebebeb";
   document.getElementById("textColorInput").value = branding.textColor || "#323232";
   document.getElementById("driveFolderIdInput").value = destination.driveFolderId || "";
-  document.getElementById("webhookInput").value = destination.webhookUrl || "";
 }
 
 function renderProjects(projects) {
@@ -74,7 +72,9 @@ function renderProjects(projects) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "project-delete-btn";
-    btn.textContent = "Delete";
+    btn.textContent = "×";
+    btn.title = `Delete ${name}`;
+    btn.setAttribute("aria-label", `Delete project ${name}`);
     btn.addEventListener("click", async () => {
       const ok = confirm(`Delete project "${name}"?`);
       if (!ok) return;
