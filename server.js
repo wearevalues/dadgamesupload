@@ -4,7 +4,10 @@ const multer = require("multer");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
+const { Readable } = require("stream");
 const { google } = require("googleapis");
+const { handleUpload } = require("@vercel/blob/client");
+const { del } = require("@vercel/blob");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -84,6 +87,10 @@ function mergeEnvIntoSettings(settings) {
   const savedFolder = pick(out.destination.driveFolderId);
   if (envFolder && !savedFolder) {
     out.destination.driveFolderId = envFolder;
+  }
+  const effectiveFolder = pick(out.destination.driveFolderId);
+  if (effectiveFolder && out.destination.provider === "local") {
+    out.destination.provider = "google-drive";
   }
   return out;
 }
@@ -365,6 +372,34 @@ async function uploadFileToGoogleDrive(file, folderId, targetName) {
   return response.data;
 }
 
+async function uploadReadableToGoogleDrive(nodeReadable, folderId, targetName, mimeType) {
+  const drive = getDriveClient();
+  const response = await drive.files.create({
+    requestBody: {
+      name: targetName,
+      parents: [folderId]
+    },
+    media: {
+      mimeType: mimeType || "application/octet-stream",
+      body: nodeReadable
+    },
+    fields: "id,name,webViewLink,webContentLink,mimeType,size",
+    supportsAllDrives: true
+  });
+
+  return response.data;
+}
+
+function isAllowedBlobHttpUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== "https:") return false;
+    return /(^|\.)blob\.vercel-storage\.com$/i.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function sanitizeDriveFolderName(value) {
   return (value || "")
     .toString()
@@ -501,8 +536,16 @@ app.get(["/", "/index.html"], sendUploaderIndexHtml);
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/settings", async (_req, res) => {
+  res.set("Cache-Control", "no-store");
   const settings = await readSettings();
-  res.json(settings);
+  res.json({
+    ...settings,
+    client: {
+      blobDriveUpload:
+        Boolean(process.env.BLOB_READ_WRITE_TOKEN) &&
+        settings.destination.provider === "google-drive"
+    }
+  });
 });
 
 app.post("/api/admin/login", (req, res) => {
@@ -656,6 +699,160 @@ app.post("/api/upload/drive-session", express.json({ limit: "32kb" }), async (re
   }
 });
 
+app.post("/api/media/blob-client", express.json({ limit: "4mb" }), async (req, res) => {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return res.status(503).json({ error: "Blob storage is not configured." });
+  }
+  try {
+    const jsonResponse = await handleUpload({
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+      request: req,
+      body: req.body,
+      onBeforeGenerateToken: async (pathname, clientPayload) => {
+        const settings = await readSettings();
+        if (settings.destination.provider !== "google-drive") {
+          throw new Error("Google Drive is not the active destination.");
+        }
+        let meta;
+        try {
+          meta = clientPayload ? JSON.parse(clientPayload) : null;
+        } catch {
+          throw new Error("Invalid upload payload.");
+        }
+        const uploaderName = (meta?.name || "").trim();
+        const project = (meta?.project || "").trim();
+        if (!uploaderName || !project) {
+          throw new Error("Name and project are required.");
+        }
+        const prefix = "media-uploader/incoming/";
+        if (!pathname || typeof pathname !== "string" || !pathname.startsWith(prefix)) {
+          throw new Error("Invalid upload path.");
+        }
+
+        return {
+          allowedContentTypes: ["image/*", "video/*", "application/octet-stream"],
+          addRandomSuffix: true,
+          maximumSizeInBytes: 100 * 1024 * 1024,
+          tokenPayload: JSON.stringify(meta)
+        };
+      }
+    });
+    return res.status(200).json(jsonResponse);
+  } catch (e) {
+    console.error("/api/media/blob-client:", e);
+    return res.status(400).json({ error: e.message || "Blob token error." });
+  }
+});
+
+app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req, res) => {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) {
+    return res.status(503).json({ error: "Blob storage is not configured." });
+  }
+
+  try {
+    const settings = await readSettings();
+    if (settings.destination.provider !== "google-drive") {
+      return res.status(400).json({ error: "Destination is not Google Drive." });
+    }
+
+    const name = (req.body?.name || "").trim();
+    const project = (req.body?.project || "").trim();
+    const uploadBatchId = (req.body?.uploadBatchId || "").trim();
+    const files = req.body?.files;
+
+    if (!name || !project) {
+      return res.status(400).json({ error: "Name and project are required." });
+    }
+    if (!uploadBatchId || !/^[a-zA-Z0-9_-]{6,80}$/.test(uploadBatchId)) {
+      return res.status(400).json({ error: "Invalid upload batch id." });
+    }
+    if (!Array.isArray(files) || files.length < 1 || files.length > 10) {
+      return res.status(400).json({ error: "Invalid files list." });
+    }
+
+    const folderId = settings.destination.driveFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
+    if (!folderId) {
+      return res.status(400).json({ error: "Google Drive folder is not configured." });
+    }
+
+    const projectFolderName = sanitizeDriveFolderName(project);
+    const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+    const safeProjectPart = sanitizePart(projectFolderName) || "project";
+    const safeName = sanitizePart(name) || "anon";
+    const uploadedDriveFiles = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const entry = files[i];
+      const url = (entry?.url || "").trim();
+      const originalFilename = ((entry?.originalFilename || "").trim() || `file_${i + 1}`).slice(0, 240);
+
+      if (!isAllowedBlobHttpUrl(url)) {
+        return res.status(400).json({ error: "Invalid blob URL." });
+      }
+      if (!url.includes(uploadBatchId)) {
+        return res.status(400).json({ error: "Upload batch does not match blob URL." });
+      }
+
+      const blobRes = await fetch(url);
+      if (!blobRes.ok) {
+        return res.status(400).json({ error: `Could not read file from Blob storage (${blobRes.status}).` });
+      }
+
+      const mimeType = blobRes.headers.get("content-type") || inferMimeFromName(originalFilename, "");
+      const safeOriginal = originalFilename.replace(/[^\w.-]/g, "_");
+      const targetName = `${safeProjectPart}_${safeName}_${uploadBatchId}_${i + 1}_${safeOriginal}`;
+
+      let nodeStream;
+      if (blobRes.body && typeof Readable.fromWeb === "function") {
+        nodeStream = Readable.fromWeb(blobRes.body, { highWaterMark: 1024 * 1024 });
+      } else {
+        const buf = Buffer.from(await blobRes.arrayBuffer());
+        nodeStream = Readable.from(buf);
+      }
+
+      let driveFile;
+      try {
+        driveFile = await uploadReadableToGoogleDrive(nodeStream, projectFolderId, targetName, mimeType);
+      } catch (uploadErr) {
+        return res.status(500).json({ error: `Google Drive upload failed: ${uploadErr.message}` });
+      }
+
+      uploadedDriveFiles.push({
+        id: driveFile.id,
+        name: driveFile.name || targetName
+      });
+
+      try {
+        await del(url, { token });
+      } catch (delErr) {
+        console.error("blob-commit del:", delErr.message);
+      }
+    }
+
+    const timestamp = new Date().toISOString();
+    await appendSubmissionCsv({
+      timestamp,
+      name,
+      city: "",
+      destination: "google-drive",
+      fileCount: uploadedDriveFiles.length,
+      fileNames: uploadedDriveFiles.map((f) => f.name),
+      fileRefs: uploadedDriveFiles.map((f) => f.id)
+    });
+
+    return res.json({
+      ok: true,
+      destination: "google-drive",
+      fileCount: uploadedDriveFiles.length,
+      project: projectFolderName
+    });
+  } catch (e) {
+    console.error("/api/media/blob-commit:", e);
+    return res.status(500).json({ error: e.message || "Commit failed." });
+  }
+});
+
 app.post("/api/upload/drive-log", express.json({ limit: "256kb" }), async (req, res) => {
   try {
     const settings = await readSettings();
@@ -726,10 +923,54 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
     }
 
     if (settings.destination.provider === "google-drive") {
-      return res.status(400).json({
-        error:
-          "This site sends media straight to Google Drive from your device. Refresh the page and try again, or clear cache."
-      });
+      const folderId = settings.destination.driveFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
+      if (!folderId) {
+        return res.status(400).json({
+          error: "Google Drive provider is selected but no folder ID is set in admin settings."
+        });
+      }
+
+      try {
+        const uploaded = [];
+        const projectFolderName = sanitizeDriveFolderName(project);
+        const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+        const safeProjectPart = sanitizePart(projectFolderName) || "project";
+        for (const [index, file] of files.entries()) {
+          const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
+          const targetName = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
+          const driveFile = await uploadFileToGoogleDrive(file, projectFolderId, targetName);
+          uploaded.push({
+            id: driveFile.id,
+            name: driveFile.name,
+            mimeType: driveFile.mimeType,
+            size: driveFile.size,
+            webViewLink: driveFile.webViewLink || null,
+            webContentLink: driveFile.webContentLink || null
+          });
+        }
+
+        await appendSubmissionCsv({
+          timestamp,
+          name,
+          city: "",
+          destination: "google-drive",
+          fileCount: uploaded.length,
+          fileNames: uploaded.map((f) => f.name),
+          fileRefs: uploaded.map((f) => f.id)
+        });
+
+        return res.json({
+          ok: true,
+          destination: "google-drive",
+          fileCount: uploaded.length,
+          project: projectFolderName,
+          files: uploaded
+        });
+      } catch (error) {
+        return res.status(500).json({
+          error: `Google Drive upload failed: ${error.message}`
+        });
+      }
     }
 
     const projectFolderName = sanitizeDriveFolderName(project);

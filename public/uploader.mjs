@@ -1,3 +1,5 @@
+import { upload as blobUpload } from "https://esm.sh/@vercel/blob@2.3.1/client";
+
 const dropzone = document.getElementById("dropzone");
 const mediaInput = document.getElementById("mediaInput");
 const preview = document.getElementById("preview");
@@ -210,7 +212,81 @@ async function parseApiJson(res) {
   return data;
 }
 
-async function uploadToGoogleDriveFromBrowser(name, project, files) {
+/** Vercel (and similar) limit for one multipart request — stay under with encoding overhead. */
+const MAX_PROXY_UPLOAD_BYTES = 3.4 * 1024 * 1024;
+
+/** True for iPhone/iPod, iPad (including iPadOS “desktop” Safari UA), and similar. */
+function isIosDevice() {
+  const ua = navigator.userAgent || "";
+  if (/iP(hone|ad|od)/.test(ua)) return true;
+  // iPadOS 13+ often reports Macintosh + touch; “Request Desktop Website” on iPhone can look like Mac too.
+  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
+  return false;
+}
+
+function totalFileBytes(files) {
+  return files.reduce((s, f) => s + f.size, 0);
+}
+
+async function compressImageFileForUpload(file, maxEdge, jpegQuality) {
+  if (!file.type.startsWith("image/")) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    try {
+      let w = bitmap.width;
+      let h = bitmap.height;
+      const scale = Math.min(1, maxEdge / Math.max(w, h));
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0, w, h);
+      const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", jpegQuality));
+      if (!blob) return file;
+      const base = (file.name || "photo").replace(/\.[^.]+$/i, "") || "photo";
+      return new File([blob], `${base}.jpg`, { type: "image/jpeg" });
+    } finally {
+      bitmap.close();
+    }
+  } catch {
+    return file;
+  }
+}
+
+async function shrinkImagesToFitVercelLimit(files, maxTotal) {
+  let list = files.slice();
+  if (totalFileBytes(list) <= maxTotal) return list;
+
+  list = await Promise.all(
+    list.map((f) => (f.type.startsWith("image/") ? compressImageFileForUpload(f, 3200, 0.86) : f))
+  );
+  if (totalFileBytes(list) <= maxTotal) return list;
+
+  list = await Promise.all(
+    list.map((f) => (f.type.startsWith("image/") ? compressImageFileForUpload(f, 2200, 0.8) : f))
+  );
+  if (totalFileBytes(list) <= maxTotal) return list;
+
+  list = await Promise.all(
+    list.map((f) => (f.type.startsWith("image/") ? compressImageFileForUpload(f, 1600, 0.74) : f))
+  );
+  return list;
+}
+
+async function uploadGoogleDriveViaServer(name, project, files) {
+  const formData = new FormData();
+  files.forEach((file) => formData.append("media", file));
+  formData.append("name", name);
+  formData.append("project", project);
+  const res = await fetch("/api/upload", { method: "POST", body: formData });
+  const data = await parseApiJson(res);
+  return { fileCount: data.fileCount, destination: data.destination };
+}
+
+/** Browser → Google resumable PUT (works on many desktops; often blocked on iOS Safari). */
+async function uploadDriveResumableDirect(name, project, files) {
   const uploadBatchId = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
   const uploadedMeta = [];
 
@@ -241,9 +317,11 @@ async function uploadToGoogleDriveFromBrowser(name, project, files) {
       });
     } catch (netErr) {
       const msg = netErr instanceof Error ? netErr.message : String(netErr);
-      throw new Error(
-        `Could not reach Google Drive from this browser (${msg}). If a blocker or strict privacy mode is on, try Safari without blockers or use Chrome.`
+      const err = new Error(
+        `Could not upload directly to Google from this browser (${msg}). We'll retry through the site if the file is small enough.`
       );
+      err.code = "DIRECT_UPLOAD_NETWORK";
+      throw err;
     }
 
     const putRaw = await putRes.text();
@@ -272,6 +350,69 @@ async function uploadToGoogleDriveFromBrowser(name, project, files) {
   });
   await parseApiJson(logRes);
   return { fileCount: uploadedMeta.length, destination: "google-drive" };
+}
+
+async function uploadGoogleDriveViaBlob(name, project, files) {
+  const uploadBatchId = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+  const committed = [];
+  const prefix = "media-uploader/incoming";
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const orig = file.name || `upload_${i + 1}`;
+    const safeSeg = orig.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180);
+    const pathname = `${prefix}/${uploadBatchId}/${i + 1}-${safeSeg}`;
+    const useMultipart = file.size > 6 * 1024 * 1024;
+    const newBlob = await blobUpload(pathname, file, {
+      access: "public",
+      handleUploadUrl: "/api/media/blob-client",
+      clientPayload: JSON.stringify({
+        name,
+        project,
+        originalFilename: orig,
+        fileIndex: i + 1
+      }),
+      multipart: useMultipart
+    });
+    committed.push({ url: newBlob.url, originalFilename: orig });
+  }
+
+  const res = await fetch("/api/media/blob-commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, project, uploadBatchId, files: committed })
+  });
+  const data = await parseApiJson(res);
+  return { fileCount: data.fileCount, destination: data.destination };
+}
+
+async function uploadToGoogleDrive(name, project, files, settingsForUpload) {
+  const blobOk =
+    settingsForUpload?.client?.blobDriveUpload ?? settingsCache?.client?.blobDriveUpload;
+  if (blobOk) {
+    return uploadGoogleDriveViaBlob(name, project, files);
+  }
+
+  if (isIosDevice()) {
+    const prepared = await shrinkImagesToFitVercelLimit(files, MAX_PROXY_UPLOAD_BYTES);
+    if (totalFileBytes(prepared) > MAX_PROXY_UPLOAD_BYTES) {
+      throw new Error(
+        "This upload is too large for Safari (about a 3.4 MB limit per submit on this host). Try a shorter video, fewer files, or open the site on a computer. For photos, we tried shrinking JPEGs automatically — HEIC or originals may need exporting as a smaller JPEG from Photos."
+      );
+    }
+    return uploadGoogleDriveViaServer(name, project, prepared);
+  }
+
+  try {
+    return await uploadDriveResumableDirect(name, project, files);
+  } catch (e) {
+    if (totalFileBytes(files) <= MAX_PROXY_UPLOAD_BYTES) {
+      return uploadGoogleDriveViaServer(name, project, files);
+    }
+    throw e instanceof Error
+      ? e
+      : new Error("Upload failed. Try a smaller file or use a different browser.");
+  }
 }
 
 function renderPreview() {
@@ -374,7 +515,6 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  const formData = new FormData();
   const name = nameInput.value.trim();
   const projectChoice = projectSelect.value;
   const project = projectChoice === customProjectValue ? projectCustomInput.value.trim() : projectChoice;
@@ -396,12 +536,11 @@ form.addEventListener("submit", async (event) => {
   errorEl.textContent = "";
 
   try {
-    let destSettings = settingsCache;
-    if (!destSettings) destSettings = await fetchSettingsFresh();
+    const destSettings = await fetchSettingsFresh();
     const provider = destSettings?.destination?.provider;
 
     if (provider === "google-drive") {
-      const data = await uploadToGoogleDriveFromBrowser(name, project, selectedFiles);
+      const data = await uploadToGoogleDrive(name, project, selectedFiles, destSettings);
       statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
     } else {
       const formData = new FormData();
