@@ -17,6 +17,7 @@ const nameInput = document.getElementById("nameInput");
 const customProjectValue = "__custom__";
 
 let selectedFiles = [];
+let settingsCache = null;
 
 const MEDIA_EXT = /\.(heic|heif|avif|jpg|jpeg|png|gif|webp|bmp|tif|tiff|mov|mp4|m4v|webm)$/i;
 const isSupportedMedia = (file) => {
@@ -27,6 +28,32 @@ const isSupportedMedia = (file) => {
   if ((mime === "application/octet-stream" || mime === "") && MEDIA_EXT.test(file.name || "")) return true;
   return false;
 };
+
+const MIME_MAP_EXT = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  avif: "image/avif",
+  bmp: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  mov: "video/quicktime",
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  webm: "video/webm"
+};
+
+function inferMimeForFile(file) {
+  const mime = (file.type || "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) return file.type;
+  const m = /\.([^.]+)$/i.exec(file.name || "");
+  const ext = m ? m[1].toLowerCase() : "";
+  return MIME_MAP_EXT[ext] || file.type || "application/octet-stream";
+}
 
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + " B";
@@ -145,12 +172,106 @@ async function loadSettings() {
   try {
     const res = await fetch("/api/settings");
     const settings = await res.json();
+    settingsCache = settings;
     applyBranding(settings);
     applySiteMeta(settings);
     renderProjects(settings.projects);
   } catch {
-    // keep defaults if settings load fails
+    settingsCache = null;
   }
+}
+
+async function fetchSettingsFresh() {
+  const res = await fetch("/api/settings");
+  const settings = await res.json();
+  settingsCache = settings;
+  return settings;
+}
+
+async function parseApiJson(res) {
+  const raw = await res.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    let hint = res.ok
+      ? "The server returned an unreadable response."
+      : "Server error. Please try again.";
+    if (res.status === 413) {
+      hint = "Request too large for this host. Try again, or contact support if this persists.";
+    } else if (res.status === 504 || res.status === 502) {
+      hint = "Service timed out or was busy. Please try again.";
+    } else if (!res.ok) {
+      hint = `Request failed (HTTP ${res.status}). Please try again.`;
+    }
+    throw new Error(hint);
+  }
+  if (!res.ok) throw new Error(data.error || "Request failed.");
+  return data;
+}
+
+async function uploadToGoogleDriveFromBrowser(name, project, files) {
+  const uploadBatchId = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+  const uploadedMeta = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const origName = file.name || `upload_${i + 1}`;
+    const sessRes = await fetch("/api/upload/drive-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        project,
+        originalFilename: origName,
+        mimeType: file.type || "",
+        uploadBatchId,
+        fileIndex: i + 1
+      })
+    });
+    const sess = await parseApiJson(sessRes);
+    const contentType = sess.contentType || inferMimeForFile(file);
+
+    let putRes;
+    try {
+      putRes = await fetch(sess.sessionUrl, {
+        method: "PUT",
+        headers: { "Content-Type": contentType },
+        body: file
+      });
+    } catch (netErr) {
+      const msg = netErr instanceof Error ? netErr.message : String(netErr);
+      throw new Error(
+        `Could not reach Google Drive from this browser (${msg}). If a blocker or strict privacy mode is on, try Safari without blockers or use Chrome.`
+      );
+    }
+
+    const putRaw = await putRes.text();
+    if (!putRes.ok) {
+      throw new Error(
+        `Google Drive rejected the file (${putRes.status}). ${putRaw.slice(0, 200)}`.trim()
+      );
+    }
+
+    let fileMeta;
+    try {
+      fileMeta = putRaw ? JSON.parse(putRaw) : {};
+    } catch {
+      throw new Error("Google Drive upload finished but returned an unexpected response.");
+    }
+    if (!fileMeta.id) {
+      throw new Error("Google Drive did not return a file id for the upload.");
+    }
+    uploadedMeta.push({ id: fileMeta.id, name: fileMeta.name || sess.targetName });
+  }
+
+  const logRes = await fetch("/api/upload/drive-log", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, project, files: uploadedMeta })
+  });
+  await parseApiJson(logRes);
+  return { fileCount: uploadedMeta.length, destination: "google-drive" };
 }
 
 function renderPreview() {
@@ -167,19 +288,23 @@ function renderPreview() {
   submitBtn.disabled = false;
   const firstFile = selectedFiles[0];
   const objectUrl = URL.createObjectURL(firstFile);
+  const previewMime = inferMimeForFile(firstFile);
 
-  if (firstFile.type.startsWith("image/")) {
+  if (previewMime.startsWith("image/")) {
     const img = document.createElement("img");
     img.src = objectUrl;
     img.alt = "Selected image preview";
     img.onload = () => URL.revokeObjectURL(objectUrl);
     preview.appendChild(img);
-  } else {
+  } else if (previewMime.startsWith("video/")) {
     const video = document.createElement("video");
     video.src = objectUrl;
     video.controls = true;
     video.onloadeddata = () => URL.revokeObjectURL(objectUrl);
     preview.appendChild(video);
+  } else {
+    preview.innerHTML = `<p>Selected: ${firstFile.name} (${formatBytes(firstFile.size)})</p>`;
+    URL.revokeObjectURL(objectUrl);
   }
 
   selectedFiles.forEach((file) => {
@@ -266,32 +391,28 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  selectedFiles.forEach((file) => formData.append("media", file));
-  formData.append("name", name);
-  formData.append("project", project);
-
   setLoading(true);
   statusEl.textContent = "Uploading...";
   errorEl.textContent = "";
 
   try {
-    const res = await fetch("/api/upload", {
-      method: "POST",
-      body: formData
-    });
-    const raw = await res.text();
-    let data = {};
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch {
-      throw new Error(
-        res.ok ? "Upload succeeded but the response was unreadable." : "Server error. Please try again."
-      );
+    let destSettings = settingsCache;
+    if (!destSettings) destSettings = await fetchSettingsFresh();
+    const provider = destSettings?.destination?.provider;
+
+    if (provider === "google-drive") {
+      const data = await uploadToGoogleDriveFromBrowser(name, project, selectedFiles);
+      statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
+    } else {
+      const formData = new FormData();
+      selectedFiles.forEach((file) => formData.append("media", file));
+      formData.append("name", name);
+      formData.append("project", project);
+
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const data = await parseApiJson(res);
+      statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
     }
-    if (!res.ok) {
-      throw new Error(data.error || "Upload failed.");
-    }
-    statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
   } catch (error) {
     errorEl.textContent = error instanceof Error ? error.message : "Upload failed.";
     statusEl.textContent = "";

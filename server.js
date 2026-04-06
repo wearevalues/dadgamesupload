@@ -281,28 +281,70 @@ function getDriveClient() {
   return google.drive({ version: "v3", auth });
 }
 
+const MIME_BY_EXT = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".mov": "video/quicktime",
+  ".mp4": "video/mp4",
+  ".m4v": "video/mp4",
+  ".webm": "video/webm"
+};
+
+function inferMimeFromName(originalname, reportedMime) {
+  const mime = (reportedMime || "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) return reportedMime;
+  const ext = path.extname(originalname || "").toLowerCase();
+  return MIME_BY_EXT[ext] || reportedMime || "application/octet-stream";
+}
+
 function inferMimeForDriveUpload(file) {
-  const mime = (file.mimetype || "").toLowerCase();
-  if (mime.startsWith("image/") || mime.startsWith("video/")) return file.mimetype;
-  const ext = path.extname(file.originalname || "").toLowerCase();
-  const map = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".heic": "image/heic",
-    ".heif": "image/heif",
-    ".avif": "image/avif",
-    ".bmp": "image/bmp",
-    ".tif": "image/tiff",
-    ".tiff": "image/tiff",
-    ".mov": "video/quicktime",
-    ".mp4": "video/mp4",
-    ".m4v": "video/mp4",
-    ".webm": "video/webm"
-  };
-  return map[ext] || file.mimetype || "application/octet-stream";
+  return inferMimeFromName(file.originalname, file.mimetype);
+}
+
+async function createDriveResumableUploadSession(parentFolderId, driveFileName, mimeType) {
+  const serviceAccount = resolveServiceAccount();
+  const auth = new google.auth.JWT({
+    email: serviceAccount.client_email,
+    key: serviceAccount.private_key,
+    scopes: ["https://www.googleapis.com/auth/drive"]
+  });
+  const access = await auth.getAccessToken();
+  const token = typeof access === "string" ? access : access?.token;
+  if (!token) throw new Error("Could not obtain Google access token.");
+
+  const initRes = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json; charset=UTF-8",
+        "X-Upload-Content-Type": mimeType
+      },
+      body: JSON.stringify({
+        name: driveFileName,
+        parents: [parentFolderId]
+      })
+    }
+  );
+
+  if (!initRes.ok) {
+    const fragment = (await initRes.text()).slice(0, 400);
+    throw new Error(`Drive resumable session failed (${initRes.status}): ${fragment}`);
+  }
+
+  const sessionUrl = initRes.headers.get("Location") || initRes.headers.get("location");
+  if (!sessionUrl) throw new Error("Drive did not return a resumable upload URL.");
+  return sessionUrl;
 }
 
 async function uploadFileToGoogleDrive(file, folderId, targetName) {
@@ -563,113 +605,203 @@ app.post("/api/admin/projects/delete", requireAdmin, async (req, res) => {
   return res.json({ ok: true, projects: updated.projects || [] });
 });
 
-app.post("/api/upload", upload.array("media", 10), async (req, res) => {
-  const settings = await readSettings();
-  const files = req.files || [];
-  const name = (req.body?.name || "").trim();
-  const project = (req.body?.project || "").trim();
-  const timestamp = new Date().toISOString();
-  const safeName = sanitizePart(name) || "anon";
-  const uploadToken = Date.now();
+app.post("/api/upload/drive-session", express.json({ limit: "32kb" }), async (req, res) => {
+  try {
+    const settings = await readSettings();
+    if (settings.destination.provider !== "google-drive") {
+      return res.status(400).json({ error: "Destination is not Google Drive." });
+    }
 
-  if (!files.length) {
-    return res.status(400).json({ error: "No media files found." });
-  }
+    const name = (req.body?.name || "").trim();
+    const project = (req.body?.project || "").trim();
+    const originalFilename = ((req.body?.originalFilename || "").trim() || "upload.bin").slice(0, 240);
+    const reportedMime = (req.body?.mimeType || "").trim();
+    const uploadBatchId = (req.body?.uploadBatchId || "").trim();
+    const fileIndex = parseInt(req.body?.fileIndex, 10);
 
-  if (!name) {
-    return res.status(400).json({ error: "Your Name is required." });
-  }
-  if (!project) {
-    return res.status(400).json({ error: "Project is required." });
-  }
+    if (!name) return res.status(400).json({ error: "Your Name is required." });
+    if (!project) return res.status(400).json({ error: "Project is required." });
+    if (!uploadBatchId || !/^[a-zA-Z0-9_-]{6,80}$/.test(uploadBatchId)) {
+      return res.status(400).json({ error: "Invalid upload batch id." });
+    }
+    if (!Number.isFinite(fileIndex) || fileIndex < 1 || fileIndex > 20) {
+      return res.status(400).json({ error: "Invalid file index." });
+    }
 
-  if (settings.destination.provider === "google-drive") {
+    const pseudo = { originalname: originalFilename, mimetype: reportedMime };
+    if (!isAllowedUploadMedia(pseudo)) {
+      return res.status(400).json({ error: "Only image/video files are allowed." });
+    }
+
     const folderId = settings.destination.driveFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
     if (!folderId) {
       return res.status(400).json({
-        error: "Google Drive provider is selected but no folder ID is set in admin settings."
+        error: "Google Drive folder is not configured in admin or environment."
       });
     }
 
-    try {
-      const uploaded = [];
-      const projectFolderName = sanitizeDriveFolderName(project);
-      const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
-      const safeProjectPart = sanitizePart(projectFolderName) || "project";
-      for (const [index, file] of files.entries()) {
-        const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
-        const targetName = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
-        const driveFile = await uploadFileToGoogleDrive(file, projectFolderId, targetName);
-        uploaded.push({
-          id: driveFile.id,
-          name: driveFile.name,
-          mimeType: driveFile.mimeType,
-          size: driveFile.size,
-          webViewLink: driveFile.webViewLink || null,
-          webContentLink: driveFile.webContentLink || null
-        });
+    const projectFolderName = sanitizeDriveFolderName(project);
+    const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+    const safeProjectPart = sanitizePart(projectFolderName) || "project";
+    const safeName = sanitizePart(name) || "anon";
+    const safeOriginal = originalFilename.replace(/[^\w.-]/g, "_");
+    const targetName = `${safeProjectPart}_${safeName}_${uploadBatchId}_${fileIndex}_${safeOriginal}`;
+    const mimeType = inferMimeFromName(originalFilename, reportedMime);
+    const sessionUrl = await createDriveResumableUploadSession(projectFolderId, targetName, mimeType);
+
+    return res.json({ sessionUrl, contentType: mimeType, targetName });
+  } catch (e) {
+    console.error("/api/upload/drive-session:", e);
+    return res.status(500).json({ error: e.message || "Could not start Google Drive upload." });
+  }
+});
+
+app.post("/api/upload/drive-log", express.json({ limit: "256kb" }), async (req, res) => {
+  try {
+    const settings = await readSettings();
+    if (settings.destination.provider !== "google-drive") {
+      return res.status(400).json({ error: "Destination is not Google Drive." });
+    }
+
+    const name = (req.body?.name || "").trim();
+    const project = (req.body?.project || "").trim();
+    const files = req.body?.files;
+
+    if (!name) return res.status(400).json({ error: "Your Name is required." });
+    if (!project) return res.status(400).json({ error: "Project is required." });
+    if (!Array.isArray(files) || files.length < 1 || files.length > 20) {
+      return res.status(400).json({ error: "Invalid files list." });
+    }
+
+    for (const f of files) {
+      if (!f || typeof f.id !== "string" || !f.name || typeof f.name !== "string") {
+        return res.status(400).json({ error: "Invalid file entry in log." });
       }
+    }
 
-      await appendSubmissionCsv({
-        timestamp,
-        name,
-        city: "",
-        destination: "google-drive",
-        fileCount: uploaded.length,
-        fileNames: uploaded.map((f) => f.name),
-        fileRefs: uploaded.map((f) => f.id)
-      });
+    const timestamp = new Date().toISOString();
+    const projectFolderName = sanitizeDriveFolderName(project);
 
-      return res.json({
-        ok: true,
-        destination: "google-drive",
-        fileCount: uploaded.length,
-        project: projectFolderName,
-        files: uploaded
+    await appendSubmissionCsv({
+      timestamp,
+      name,
+      city: "",
+      destination: "google-drive",
+      fileCount: files.length,
+      fileNames: files.map((f) => f.name),
+      fileRefs: files.map((f) => f.id)
+    });
+
+    return res.json({
+      ok: true,
+      destination: "google-drive",
+      fileCount: files.length,
+      project: projectFolderName
+    });
+  } catch (e) {
+    console.error("/api/upload/drive-log:", e);
+    return res.status(500).json({ error: e.message || "Could not record submission." });
+  }
+});
+
+app.post("/api/upload", upload.array("media", 10), async (req, res) => {
+  try {
+    const settings = await readSettings();
+    const files = req.files || [];
+    const name = (req.body?.name || "").trim();
+    const project = (req.body?.project || "").trim();
+    const timestamp = new Date().toISOString();
+    const safeName = sanitizePart(name) || "anon";
+    const uploadToken = Date.now();
+
+    if (!files.length) {
+      return res.status(400).json({ error: "No media files found." });
+    }
+
+    if (!name) {
+      return res.status(400).json({ error: "Your Name is required." });
+    }
+    if (!project) {
+      return res.status(400).json({ error: "Project is required." });
+    }
+
+    if (settings.destination.provider === "google-drive") {
+      return res.status(400).json({
+        error:
+          "This site sends media straight to Google Drive from your device. Refresh the page and try again, or clear cache."
       });
-    } catch (error) {
-      return res.status(500).json({
-        error: `Google Drive upload failed: ${error.message}`
-      });
+    }
+
+    const projectFolderName = sanitizeDriveFolderName(project);
+    const safeProjectPart = sanitizePart(projectFolderName) || "project";
+
+    const localFiles = files.map((file, index) => {
+      const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
+      const renamed = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
+      return {
+        filename: file.filename,
+        originalName: file.originalname,
+        storedAs: renamed,
+        size: file.size,
+        mimeType: file.mimetype
+      };
+    });
+
+    await appendSubmissionCsv({
+      timestamp,
+      name,
+      city: "",
+      destination: settings.destination.provider,
+      fileCount: localFiles.length,
+      fileNames: localFiles.map((f) => f.storedAs),
+      fileRefs: localFiles.map((f) => f.filename)
+    });
+
+    return res.json({
+      ok: true,
+      destination: settings.destination.provider,
+      fileCount: localFiles.length,
+      project: projectFolderName,
+      files: localFiles
+    });
+  } catch (error) {
+    console.error("/api/upload:", error);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: error.message || "Upload failed on the server." });
     }
   }
-
-  const projectFolderName = sanitizeDriveFolderName(project);
-  const safeProjectPart = sanitizePart(projectFolderName) || "project";
-
-  const localFiles = files.map((file, index) => {
-    const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
-    const renamed = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
-    return {
-      filename: file.filename,
-      originalName: file.originalname,
-      storedAs: renamed,
-      size: file.size,
-      mimeType: file.mimetype
-    };
-  });
-
-  await appendSubmissionCsv({
-    timestamp,
-    name,
-    city: "",
-    destination: settings.destination.provider,
-    fileCount: localFiles.length,
-    fileNames: localFiles.map((f) => f.storedAs),
-    fileRefs: localFiles.map((f) => f.filename)
-  });
-
-  return res.json({
-    ok: true,
-    destination: settings.destination.provider,
-    fileCount: localFiles.length,
-    project: projectFolderName,
-    files: localFiles
-  });
 });
 
 app.get("/admin", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "admin.html"));
+});
+
+app.use((err, req, res, next) => {
+  console.error("express error:", req.method, req.path, err);
+  if (res.headersSent) return next(err);
+  if (err.name === "MulterError") {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        error:
+          "That file is too large for this deployment. Try a smaller photo or shorter video, or reduce quality in your camera settings."
+      });
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      return res.status(400).json({ error: "Too many files in one upload." });
+    }
+    if (err.code === "LIMIT_UNEXPECTED_FILE") {
+      return res.status(400).json({ error: "Unexpected upload field." });
+    }
+    return res.status(400).json({ error: err.message || "Upload could not be processed." });
+  }
+  const msg = err.message || "";
+  if (msg.includes("Only image")) {
+    return res.status(400).json({ error: msg });
+  }
+  const status =
+    typeof err.status === "number" ? err.status : typeof err.statusCode === "number" ? err.statusCode : 500;
+  const safe = status >= 400 && status < 600 ? status : 500;
+  return res.status(safe).json({ error: msg || "Server error." });
 });
 
 if (isVercel) {
