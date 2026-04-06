@@ -242,14 +242,7 @@ dropzone.addEventListener("drop", (event) => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!nameInput.checkValidity()) {
-    nameInput.reportValidity();
-    return;
-  }
-  if (!projectSelect.checkValidity()) {
-    projectSelect.reportValidity();
-    return;
-  }
+  errorEl.textContent = "";
 
   if (!selectedFiles.length) {
     errorEl.textContent = "Please add at least one photo or video.";
@@ -263,11 +256,13 @@ form.addEventListener("submit", async (event) => {
 
   if (!name) {
     errorEl.textContent = "Your Name is required.";
+    nameInput.focus();
     return;
   }
 
   if (!project) {
-    errorEl.textContent = "Project is required.";
+    errorEl.textContent = "Please choose a project (or Other and type a name).";
+    projectSelect.focus();
     return;
   }
 
@@ -284,13 +279,21 @@ form.addEventListener("submit", async (event) => {
       method: "POST",
       body: formData
     });
-    const data = await res.json();
+    const raw = await res.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error(
+        res.ok ? "Upload succeeded but the response was unreadable." : "Server error. Please try again."
+      );
+    }
     if (!res.ok) {
       throw new Error(data.error || "Upload failed.");
     }
     statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
   } catch (error) {
-    errorEl.textContent = error.message || "Upload failed.";
+    errorEl.textContent = error instanceof Error ? error.message : "Upload failed.";
     statusEl.textContent = "";
   } finally {
     setLoading(false);

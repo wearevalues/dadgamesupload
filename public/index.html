@@ -24,13 +24,8 @@
               <div class="icon">↑</div>
               <p class="hint"><strong>Tap, click, or drag files here</strong><br />Supports photos and videos</p>
             </div>
-            <input
-              id="mediaInput"
-              type="file"
-              accept="image/*,video/*,.heic,.heif,.avif"
-              multiple
-              hidden
-            />
+            <!-- No accept= : iOS Safari can mis-validate HEIC/stream types against accept and block upload. We filter in JS + server. -->
+            <input id="mediaInput" type="file" multiple hidden />
             <div id="preview" class="preview">
               <p>No media selected yet.</p>
             </div>
@@ -40,12 +35,21 @@
 
           <div class="field">
             <label for="nameInput">Your Name</label>
-            <input id="nameInput" class="input" type="text" name="name" autocomplete="name" required />
+            <input
+              id="nameInput"
+              class="input"
+              type="text"
+              name="name"
+              autocomplete="off"
+              autocorrect="on"
+              spellcheck="false"
+              aria-required="true"
+            />
           </div>
 
           <div class="field">
             <label for="projectSelect">Project</label>
-            <select id="projectSelect" class="input" name="project" required>
+            <select id="projectSelect" class="input" name="project" aria-required="true">
               <option value="" selected disabled>Select a project</option>
             </select>
             <input id="projectCustomInput" class="input hidden" type="text" placeholder="Type project name" />
@@ -60,6 +64,6 @@
       </section>
     </main>
 
-    <script src="/uploader.js"></script>
+    <script src="/uploader.js?v=novalidate-iphone"></script>
   </body>
 </html>
