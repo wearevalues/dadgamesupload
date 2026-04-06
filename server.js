@@ -190,7 +190,7 @@ function buildUploaderHeadHtml(settings, canonicalUrl) {
 let cachedUploaderIndexTemplate = null;
 async function getUploaderIndexTemplate() {
   if (!cachedUploaderIndexTemplate) {
-    cachedUploaderIndexTemplate = await fsp.readFile(path.join(__dirname, "public", "index.html"), "utf8");
+    cachedUploaderIndexTemplate = await fsp.readFile(path.join(__dirname, "views", "index.html"), "utf8");
   }
   return cachedUploaderIndexTemplate;
 }
