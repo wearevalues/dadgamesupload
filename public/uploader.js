@@ -12,12 +12,21 @@ const subtitleEl = document.getElementById("subtitle");
 const logoEl = document.getElementById("brandLogoTop");
 const projectSelect = document.getElementById("projectSelect");
 const projectCustomInput = document.getElementById("projectCustomInput");
+const nameInput = document.getElementById("nameInput");
 
 const customProjectValue = "__custom__";
 
 let selectedFiles = [];
 
-const isSupportedMedia = (file) => file.type.startsWith("image/") || file.type.startsWith("video/");
+const MEDIA_EXT = /\.(heic|heif|avif|jpg|jpeg|png|gif|webp|bmp|tif|tiff|mov|mp4|m4v|webm)$/i;
+const isSupportedMedia = (file) => {
+  const mime = (file.type || "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) return true;
+  // Some devices send photos as application/octet-stream or an empty type; the file input's
+  // accept= check can still fail on those — we only validate name/project below, not the file field.
+  if ((mime === "application/octet-stream" || mime === "") && MEDIA_EXT.test(file.name || "")) return true;
+  return false;
+};
 
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + " B";
@@ -51,6 +60,45 @@ function applyBranding(settings) {
     logoEl.classList.remove("hidden");
   } else {
     logoEl.classList.add("hidden");
+  }
+}
+
+function upsertMeta(selector, attribute, value) {
+  if (!value) return;
+  let el = document.head.querySelector(selector);
+  if (!el) {
+    el = document.createElement("meta");
+    if (selector.includes("property=")) {
+      el.setAttribute("property", selector.match(/property=\"([^\"]+)\"/)?.[1] || "");
+    } else if (selector.includes("name=")) {
+      el.setAttribute("name", selector.match(/name=\"([^\"]+)\"/)?.[1] || "");
+    }
+    document.head.appendChild(el);
+  }
+  el.setAttribute(attribute, value);
+}
+
+function applySiteMeta(settings) {
+  const site = settings?.site || {};
+  const title = site.title || settings?.branding?.title || "Share Your Media";
+  const description = site.description || settings?.branding?.subtitle || "Capture your moments and share it with us.";
+  const faviconUrl = site.faviconUrl || "";
+  const ogImage = site.ogImage || "";
+
+  document.title = title;
+  upsertMeta('meta[name="description"]', "content", description);
+  upsertMeta('meta[property="og:title"]', "content", title);
+  upsertMeta('meta[property="og:description"]', "content", description);
+  if (ogImage) upsertMeta('meta[property="og:image"]', "content", ogImage);
+
+  if (faviconUrl) {
+    let icon = document.head.querySelector('link[rel="icon"]');
+    if (!icon) {
+      icon = document.createElement("link");
+      icon.setAttribute("rel", "icon");
+      document.head.appendChild(icon);
+    }
+    icon.setAttribute("href", faviconUrl);
   }
 }
 
@@ -98,6 +146,7 @@ async function loadSettings() {
     const res = await fetch("/api/settings");
     const settings = await res.json();
     applyBranding(settings);
+    applySiteMeta(settings);
     renderProjects(settings.projects);
   } catch {
     // keep defaults if settings load fails
@@ -140,14 +189,24 @@ function renderPreview() {
   });
 }
 
+function syncMediaInputFiles(files) {
+  const dt = new DataTransfer();
+  files.forEach((f) => dt.items.add(f));
+  mediaInput.files = dt.files;
+}
+
 function setFiles(fileList) {
   const incoming = Array.from(fileList);
   const validFiles = incoming.filter(isSupportedMedia);
   if (!validFiles.length) {
     errorEl.textContent = "Only image and video files are allowed.";
+    selectedFiles = [];
+    syncMediaInputFiles([]);
+    renderPreview();
     return;
   }
   selectedFiles = validFiles;
+  syncMediaInputFiles(validFiles);
   renderPreview();
 }
 
@@ -183,7 +242,14 @@ dropzone.addEventListener("drop", (event) => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!form.reportValidity()) return;
+  if (!nameInput.checkValidity()) {
+    nameInput.reportValidity();
+    return;
+  }
+  if (!projectSelect.checkValidity()) {
+    projectSelect.reportValidity();
+    return;
+  }
 
   if (!selectedFiles.length) {
     errorEl.textContent = "Please add at least one photo or video.";
@@ -191,7 +257,7 @@ form.addEventListener("submit", async (event) => {
   }
 
   const formData = new FormData();
-  const name = document.getElementById("nameInput").value.trim();
+  const name = nameInput.value.trim();
   const projectChoice = projectSelect.value;
   const project = projectChoice === customProjectValue ? projectCustomInput.value.trim() : projectChoice;
 

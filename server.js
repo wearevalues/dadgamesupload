@@ -21,6 +21,12 @@ const settingsPath = path.join(dataDir, "settings.json");
 const submissionsCsvPath = path.join(dataDir, "submissions.csv");
 
 const defaultSettings = {
+  site: {
+    title: "Share Your Media",
+    description: "Capture your moments and share it with us.",
+    faviconUrl: "",
+    ogImage: ""
+  },
   branding: {
     title: "Share Your Media",
     subtitle: "Capture your moments and share it with us.",
@@ -58,10 +64,15 @@ async function ensureStorage() {
 function mergeEnvIntoSettings(settings) {
   const out = {
     ...settings,
+    site: { ...(settings.site || {}) },
     branding: { ...settings.branding },
     destination: { ...settings.destination }
   };
   const pick = (v) => (v != null && String(v).trim() !== "" ? String(v).trim() : null);
+  if (pick(process.env.SITE_TITLE)) out.site.title = pick(process.env.SITE_TITLE);
+  if (pick(process.env.SITE_DESCRIPTION)) out.site.description = pick(process.env.SITE_DESCRIPTION);
+  if (pick(process.env.SITE_FAVICON_URL)) out.site.faviconUrl = pick(process.env.SITE_FAVICON_URL);
+  if (pick(process.env.SITE_OG_IMAGE)) out.site.ogImage = pick(process.env.SITE_OG_IMAGE);
   if (pick(process.env.BRANDING_LOGO_URL)) out.branding.logoUrl = pick(process.env.BRANDING_LOGO_URL);
   if (pick(process.env.BRANDING_TITLE)) out.branding.title = pick(process.env.BRANDING_TITLE);
   if (pick(process.env.BRANDING_SUBTITLE)) out.branding.subtitle = pick(process.env.BRANDING_SUBTITLE);
@@ -130,10 +141,77 @@ async function readSettings() {
   const merged = {
     ...defaultSettings,
     ...parsed,
+    site: { ...(defaultSettings.site || {}), ...((parsed && parsed.site) || {}) },
     branding: { ...defaultSettings.branding, ...(parsed.branding || {}) },
     destination: { ...defaultSettings.destination, ...(parsed.destination || {}) }
   };
   return mergeEnvIntoSettings(merged);
+}
+
+function escapeHtmlAttr(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
+
+function buildUploaderHeadHtml(settings, canonicalUrl) {
+  const site = settings.site || {};
+  const branding = settings.branding || {};
+  const title = (site.title || branding.title || defaultSettings.branding.title).trim();
+  const description = (site.description || branding.subtitle || defaultSettings.site.description).trim();
+  const faviconUrl = (site.faviconUrl || "").trim();
+  const ogImage = (site.ogImage || "").trim();
+  const iconHref = faviconUrl || "/favicon.ico";
+
+  const lines = [
+    `<title>${escapeHtmlAttr(title)}</title>`,
+    `<meta name="description" content="${escapeHtmlAttr(description)}" />`,
+    `<meta property="og:title" content="${escapeHtmlAttr(title)}" />`,
+    `<meta property="og:description" content="${escapeHtmlAttr(description)}" />`,
+    `<meta property="og:type" content="website" />`,
+    `<meta property="og:url" content="${escapeHtmlAttr(canonicalUrl)}" />`
+  ];
+
+  if (ogImage) {
+    lines.push(`<meta property="og:image" content="${escapeHtmlAttr(ogImage)}" />`);
+    lines.push(`<meta name="twitter:card" content="summary_large_image" />`);
+    lines.push(`<meta name="twitter:image" content="${escapeHtmlAttr(ogImage)}" />`);
+  } else {
+    lines.push(`<meta name="twitter:card" content="summary" />`);
+  }
+  lines.push(`<meta name="twitter:title" content="${escapeHtmlAttr(title)}" />`);
+  lines.push(`<meta name="twitter:description" content="${escapeHtmlAttr(description)}" />`);
+  lines.push(`<link rel="icon" href="${escapeHtmlAttr(iconHref)}" sizes="any" />`);
+
+  return `    ${lines.join("\n    ")}`;
+}
+
+let cachedUploaderIndexTemplate = null;
+async function getUploaderIndexTemplate() {
+  if (!cachedUploaderIndexTemplate) {
+    cachedUploaderIndexTemplate = await fsp.readFile(path.join(__dirname, "public", "index.html"), "utf8");
+  }
+  return cachedUploaderIndexTemplate;
+}
+
+async function sendUploaderIndexHtml(req, res, next) {
+  try {
+    const settings = await readSettings();
+    const proto = req.get("x-forwarded-proto") || req.protocol || "https";
+    const host = req.get("host") || "";
+    const pathPart = (req.originalUrl || "/").split("?")[0];
+    const canonicalUrl = host ? `${proto}://${host}${pathPart}` : pathPart;
+    const tpl = await getUploaderIndexTemplate();
+    const marker = "<!-- __UPLOADER_HEAD__ -->";
+    if (!tpl.includes(marker)) {
+      return next();
+    }
+    const html = tpl.replace(marker, buildUploaderHeadHtml(settings, canonicalUrl));
+    res.type("html").send(html);
+  } catch (err) {
+    next(err);
+  }
 }
 
 async function writeSettings(next) {
@@ -203,6 +281,30 @@ function getDriveClient() {
   return google.drive({ version: "v3", auth });
 }
 
+function inferMimeForDriveUpload(file) {
+  const mime = (file.mimetype || "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) return file.mimetype;
+  const ext = path.extname(file.originalname || "").toLowerCase();
+  const map = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".avif": "image/avif",
+    ".bmp": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".mov": "video/quicktime",
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm"
+  };
+  return map[ext] || file.mimetype || "application/octet-stream";
+}
+
 async function uploadFileToGoogleDrive(file, folderId, targetName) {
   const drive = getDriveClient();
   const response = await drive.files.create({
@@ -211,7 +313,7 @@ async function uploadFileToGoogleDrive(file, folderId, targetName) {
       parents: [folderId]
     },
     media: {
-      mimeType: file.mimetype,
+      mimeType: inferMimeForDriveUpload(file),
       body: fs.createReadStream(file.path)
     },
     fields: "id,name,webViewLink,webContentLink,mimeType,size",
@@ -268,6 +370,17 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: "Not authenticated." });
 }
 
+const MEDIA_UPLOAD_EXT = /\.(heic|heif|avif|jpg|jpeg|png|gif|webp|bmp|tif|tiff|mov|mp4|m4v|webm)$/i;
+
+function isAllowedUploadMedia(file) {
+  const mime = (file.mimetype || "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/")) return true;
+  if (mime === "application/octet-stream" || mime === "" || mime === "binary/octet-stream") {
+    return MEDIA_UPLOAD_EXT.test(file.originalname || "");
+  }
+  return false;
+}
+
 const storage = multer.diskStorage({
   destination: async (_req, _file, cb) => {
     try {
@@ -287,7 +400,7 @@ const upload = multer({
   storage,
   limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith("image/") || file.mimetype.startsWith("video/")) {
+    if (isAllowedUploadMedia(file)) {
       cb(null, true);
       return;
     }
@@ -342,6 +455,7 @@ app.use(async (_req, _res, next) => {
 });
 
 app.use("/uploads", express.static(publicUploadsDir));
+app.get(["/", "/index.html"], sendUploaderIndexHtml);
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/settings", async (_req, res) => {
