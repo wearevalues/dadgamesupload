@@ -1,0 +1,66 @@
+# Deploy this repository to both production apps on every push to `main`.
+#
+# Required GitHub secret (repo → Settings → Secrets and variables → Actions):
+#   VERCEL_TOKEN — create at https://vercel.com/account/tokens (scope must include team below)
+#
+# If a project is also connected to this repo under Vercel → Git, you may get two
+# production builds for that project per push. Prefer either:
+#   • Disconnect Git on the project(s) and rely on this workflow only, or
+#   • Remove that project from the matrix and keep native Git deploy for it only.
+
+name: Deploy to Vercel (both brands)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: vercel-both-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  production:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: photo-uploader
+            project_id: prj_CPslILPSDxoD4tbY8SrQSMZKxEzi
+          - name: valuesupload
+            project_id: prj_PAlJ92RZvmwF5m4z1K86vmUfTtHd
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Point Vercel CLI at ${{ matrix.name }}
+        env:
+          VERCEL_PROJECT_ID: ${{ matrix.project_id }}
+          VERCEL_PROJECT_NAME: ${{ matrix.name }}
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          fs.mkdirSync(".vercel", { recursive: true });
+          fs.writeFileSync(
+            ".vercel/project.json",
+            JSON.stringify({
+              projectId: process.env.VERCEL_PROJECT_ID,
+              orgId: "team_TXsIpOODCmVGCrSzRN9MD73Q",
+              projectName: process.env.VERCEL_PROJECT_NAME
+            })
+          );
+          NODE
+
+      - name: Deploy ${{ matrix.name }} (production)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
