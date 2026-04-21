@@ -379,8 +379,9 @@ async function uploadDriveResumableDirect(name, project, files) {
 
 async function uploadGoogleDriveViaBlob(name, project, files) {
   const uploadBatchId = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
-  const committed = [];
   const prefix = "media-uploader/incoming";
+  let uploadedCount = 0;
+  let destination = "google-drive";
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -399,16 +400,24 @@ async function uploadGoogleDriveViaBlob(name, project, files) {
       }),
       multipart: useMultipart
     });
-    committed.push({ url: newBlob.url, originalFilename: orig });
+
+    // Commit each file individually to keep each serverless invocation short.
+    const res = await fetch("/api/media/blob-commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        project,
+        uploadBatchId,
+        files: [{ url: newBlob.url, originalFilename: orig }]
+      })
+    });
+    const data = await parseApiJson(res);
+    uploadedCount += data.fileCount || 1;
+    destination = data.destination || destination;
   }
 
-  const res = await fetch("/api/media/blob-commit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, project, uploadBatchId, files: committed })
-  });
-  const data = await parseApiJson(res);
-  return { fileCount: data.fileCount, destination: data.destination };
+  return { fileCount: uploadedCount, destination };
 }
 
 async function uploadToGoogleDrive(name, project, files, settingsForUpload) {
