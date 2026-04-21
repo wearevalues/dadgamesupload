@@ -28,6 +28,11 @@
                   >If your phone will not confirm many items at once, pick a few, then use <strong>Add more</strong>.</span
                 >
               </p>
+              <p id="iosMultiHint" class="hint-sub ios-multi-hint hidden" role="note">
+                <strong>iPhone:</strong> after you tap <strong>Done</strong> in Photos, it can take a few seconds before
+                your picks show here — that is normal for larger batches.
+              </p>
+              <p id="pickerWaitLine" class="picker-wait-line hidden" aria-live="polite"></p>
             </div>
             <!-- No accept= : iOS Safari can mis-validate HEIC/stream types against accept and block upload. We filter in JS + server. -->
             <input id="mediaInput" type="file" multiple hidden />
@@ -73,6 +78,6 @@
       </section>
     </main>
 
-    <script type="module" src="/uploader.mjs?v=picker-native-1"></script>
+    <script type="module" src="/uploader.mjs?v=ios-picker-wait-1"></script>
   </body>
 </html>

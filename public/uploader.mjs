@@ -17,6 +17,8 @@ const logoEl = document.getElementById("brandLogoTop");
 const projectSelect = document.getElementById("projectSelect");
 const projectCustomInput = document.getElementById("projectCustomInput");
 const nameInput = document.getElementById("nameInput");
+const iosMultiHint = document.getElementById("iosMultiHint");
+const pickerWaitLine = document.getElementById("pickerWaitLine");
 
 const customProjectValue = "__custom__";
 
@@ -233,6 +235,38 @@ function isIosDevice() {
   // iPadOS 13+ often reports Macintosh + touch; “Request Desktop Website” on iPhone can look like Mac too.
   if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
   return false;
+}
+
+/** Cleared when `change` fires or after max wait (covers Cancel in the picker). */
+let pickerWaitTimer = null;
+
+function endPickerWait() {
+  if (pickerWaitTimer != null) {
+    window.clearTimeout(pickerWaitTimer);
+    pickerWaitTimer = null;
+  }
+  dropzone.classList.remove("picker-waiting");
+  dropzone.removeAttribute("aria-busy");
+  if (pickerWaitLine) {
+    pickerWaitLine.textContent = "";
+    pickerWaitLine.classList.add("hidden");
+  }
+}
+
+function beginPickerWait() {
+  endPickerWait();
+  if (!isIosDevice()) return;
+  dropzone.classList.add("picker-waiting");
+  dropzone.setAttribute("aria-busy", "true");
+  if (pickerWaitLine) {
+    pickerWaitLine.textContent =
+      "Opened Photos. After you tap Done, please wait — your phone may need a little time to prepare many files.";
+    pickerWaitLine.classList.remove("hidden");
+  }
+  pickerWaitTimer = window.setTimeout(() => {
+    pickerWaitTimer = null;
+    endPickerWait();
+  }, 90000);
 }
 
 function totalFileBytes(files) {
@@ -538,12 +572,14 @@ function appendFiles(fileList) {
 
 dropzone.addEventListener("click", () => {
   appendNextPick = false;
+  beginPickerWait();
   mediaInput.click();
 });
 dropzone.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
     appendNextPick = false;
+    beginPickerWait();
     mediaInput.click();
   }
 });
@@ -551,6 +587,7 @@ dropzone.addEventListener("keydown", (event) => {
 if (addMoreMediaBtn) {
   addMoreMediaBtn.addEventListener("click", () => {
     appendNextPick = true;
+    beginPickerWait();
     mediaInput.click();
   });
 }
@@ -566,6 +603,7 @@ if (clearMediaBtn) {
 }
 
 mediaInput.addEventListener("change", (event) => {
+  endPickerWait();
   const list = event.target.files;
   const shouldAppend = appendNextPick;
   appendNextPick = false;
@@ -656,3 +694,4 @@ form.addEventListener("submit", async (event) => {
 
 projectSelect.addEventListener("change", syncProjectUI);
 loadSettings();
+if (isIosDevice() && iosMultiHint) iosMultiHint.classList.remove("hidden");
