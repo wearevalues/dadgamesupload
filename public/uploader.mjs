@@ -215,6 +215,9 @@ async function parseApiJson(res) {
 /** Vercel (and similar) limit for one multipart request — stay under with encoding overhead. */
 const MAX_PROXY_UPLOAD_BYTES = 3.4 * 1024 * 1024;
 
+/** Fewer files per request avoids serverless timeouts (especially Drive + Blob commit). Must stay ≤ server limit of 10. */
+const MAX_FILES_PER_UPLOAD_BATCH = 5;
+
 /** True for iPhone/iPod, iPad (including iPadOS “desktop” Safari UA), and similar. */
 function isIosDevice() {
   const ua = navigator.userAgent || "";
@@ -226,6 +229,28 @@ function isIosDevice() {
 
 function totalFileBytes(files) {
   return files.reduce((s, f) => s + f.size, 0);
+}
+
+function chunkFiles(files, chunkSize) {
+  const out = [];
+  for (let i = 0; i < files.length; i += chunkSize) {
+    out.push(files.slice(i, i + chunkSize));
+  }
+  return out;
+}
+
+async function uploadOneBatch(name, project, files, destSettings) {
+  const provider = destSettings?.destination?.provider;
+  if (provider === "google-drive") {
+    return uploadToGoogleDrive(name, project, files, destSettings);
+  }
+  const formData = new FormData();
+  files.forEach((file) => formData.append("media", file));
+  formData.append("name", name);
+  formData.append("project", project);
+  const res = await fetch("/api/upload", { method: "POST", body: formData });
+  const data = await parseApiJson(res);
+  return { fileCount: data.fileCount, destination: data.destination };
 }
 
 async function compressImageFileForUpload(file, maxEdge, jpegQuality) {
@@ -537,21 +562,23 @@ form.addEventListener("submit", async (event) => {
 
   try {
     const destSettings = await fetchSettingsFresh();
-    const provider = destSettings?.destination?.provider;
+    const batches = chunkFiles(selectedFiles, MAX_FILES_PER_UPLOAD_BATCH);
+    let uploadedTotal = 0;
+    let lastDestination = "";
 
-    if (provider === "google-drive") {
-      const data = await uploadToGoogleDrive(name, project, selectedFiles, destSettings);
-      statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
-    } else {
-      const formData = new FormData();
-      selectedFiles.forEach((file) => formData.append("media", file));
-      formData.append("name", name);
-      formData.append("project", project);
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      statusEl.textContent =
+        batches.length > 1
+          ? `Uploading batch ${i + 1} of ${batches.length} (${batch.length} file${batch.length === 1 ? "" : "s"})…`
+          : "Uploading…";
 
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
-      const data = await parseApiJson(res);
-      statusEl.textContent = `Uploaded ${data.fileCount} file(s) to ${data.destination}.`;
+      const data = await uploadOneBatch(name, project, batch, destSettings);
+      uploadedTotal += data.fileCount;
+      lastDestination = data.destination;
     }
+
+    statusEl.textContent = `Uploaded ${uploadedTotal} file(s) to ${lastDestination}.`;
   } catch (error) {
     errorEl.textContent = error instanceof Error ? error.message : "Upload failed.";
     statusEl.textContent = "";
