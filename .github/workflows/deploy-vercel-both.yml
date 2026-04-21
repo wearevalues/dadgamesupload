@@ -1,7 +1,12 @@
 # Deploy this repository to both production apps on every push to `main`.
 #
-# Required GitHub secret (repo → Settings → Secrets and variables → Actions):
-#   VERCEL_TOKEN — create at https://vercel.com/account/tokens (scope must include team below)
+# Secrets: each job uses a GitHub Environment (see `matrix.environment`). Put the same
+#   VERCEL_TOKEN
+# in both environments (Settings → Environments → "Production – …" → Environment secrets),
+# or use one repository-level Actions secret instead (Settings → Secrets and variables → Actions).
+# Token: https://vercel.com/account/tokens (access to team wearevalues-projects)
+#
+# Environment names must match GitHub exactly (including the dash character).
 #
 # If a project is also connected to this repo under Vercel → Git, you may get two
 # production builds for that project per push. Prefer either:
@@ -28,8 +33,12 @@ jobs:
         include:
           - name: photo-uploader
             project_id: prj_CPslILPSDxoD4tbY8SrQSMZKxEzi
+            environment: "Production – photo-uploader"
           - name: valuesupload
             project_id: prj_PAlJ92RZvmwF5m4z1K86vmUfTtHd
+            environment: "Production – valuesupload"
+
+    environment: ${{ matrix.environment }}
 
     steps:
       - uses: actions/checkout@v4
