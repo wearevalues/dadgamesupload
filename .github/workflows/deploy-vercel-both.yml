@@ -24,6 +24,10 @@ concurrency:
   group: vercel-both-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Quieter GitHub warnings about Node 20 in older action internals
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   production:
     runs-on: ubuntu-latest
@@ -69,7 +73,31 @@ jobs:
           );
           NODE
 
+      - name: Verify Vercel auth and target
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "::error::VERCEL_TOKEN is empty for this environment. Add it under Settings → Environments → ${{ matrix.environment }} → Environment secrets."
+            exit 1
+          fi
+          npx vercel@51.6.1 whoami --token "$VERCEL_TOKEN"
+          echo "Linked project file:"
+          cat .vercel/project.json
+
       - name: Deploy ${{ matrix.name }} (production)
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
+        run: |
+          # Retry: photo-uploader often has Vercel Git + Actions deploy racing on the same push.
+          for attempt in 1 2 3; do
+            echo "Deploy attempt ${attempt}..."
+            if npx vercel@51.6.1 deploy --prod --yes --token "$VERCEL_TOKEN"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Vercel deploy failed after 3 attempts. Open the log above for the CLI error."
+              exit 1
+            fi
+            sleep 25
+          done
