@@ -2,6 +2,8 @@ import { upload as blobUpload } from "https://esm.sh/@vercel/blob@2.3.1/client";
 
 const dropzone = document.getElementById("dropzone");
 const mediaInput = document.getElementById("mediaInput");
+const addMoreMediaBtn = document.getElementById("addMoreMediaBtn");
+const clearMediaBtn = document.getElementById("clearMediaBtn");
 const preview = document.getElementById("preview");
 const selectedList = document.getElementById("selectedList");
 const errorEl = document.getElementById("error");
@@ -20,6 +22,12 @@ const customProjectValue = "__custom__";
 
 let selectedFiles = [];
 let settingsCache = null;
+/** Next native picker session should append to selection (Add more). */
+let appendNextPick = false;
+
+function fileSignature(file) {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
 
 const MEDIA_EXT = /\.(heic|heif|avif|jpg|jpeg|png|gif|webp|bmp|tif|tiff|mov|mp4|m4v|webm)$/i;
 const isSupportedMedia = (file) => {
@@ -489,37 +497,87 @@ function renderPreview() {
   });
 }
 
-function syncMediaInputFiles(files) {
-  const dt = new DataTransfer();
-  files.forEach((f) => dt.items.add(f));
-  mediaInput.files = dt.files;
-}
-
 function setFiles(fileList) {
   const incoming = Array.from(fileList);
   const validFiles = incoming.filter(isSupportedMedia);
   if (!validFiles.length) {
     errorEl.textContent = "Only image and video files are allowed.";
     selectedFiles = [];
-    syncMediaInputFiles([]);
     renderPreview();
+    mediaInput.value = "";
     return;
   }
   selectedFiles = validFiles;
-  syncMediaInputFiles(validFiles);
+  errorEl.textContent = "";
   renderPreview();
+  mediaInput.value = "";
 }
 
-dropzone.addEventListener("click", () => mediaInput.click());
+function appendFiles(fileList) {
+  const incoming = Array.from(fileList);
+  const validNew = incoming.filter(isSupportedMedia);
+  if (!validNew.length) {
+    errorEl.textContent = "Only image and video files are allowed.";
+    renderPreview();
+    mediaInput.value = "";
+    return;
+  }
+  const existing = new Set(selectedFiles.map(fileSignature));
+  const merged = [...selectedFiles];
+  for (const f of validNew) {
+    if (!existing.has(fileSignature(f))) {
+      merged.push(f);
+      existing.add(fileSignature(f));
+    }
+  }
+  selectedFiles = merged;
+  errorEl.textContent = "";
+  renderPreview();
+  mediaInput.value = "";
+}
+
+dropzone.addEventListener("click", () => {
+  appendNextPick = false;
+  mediaInput.click();
+});
 dropzone.addEventListener("keydown", (event) => {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
+    appendNextPick = false;
     mediaInput.click();
   }
 });
 
+if (addMoreMediaBtn) {
+  addMoreMediaBtn.addEventListener("click", () => {
+    appendNextPick = true;
+    mediaInput.click();
+  });
+}
+
+if (clearMediaBtn) {
+  clearMediaBtn.addEventListener("click", () => {
+    appendNextPick = false;
+    selectedFiles = [];
+    errorEl.textContent = "";
+    mediaInput.value = "";
+    renderPreview();
+  });
+}
+
 mediaInput.addEventListener("change", (event) => {
-  if (event.target.files) setFiles(event.target.files);
+  const list = event.target.files;
+  const shouldAppend = appendNextPick;
+  appendNextPick = false;
+  if (!list || !list.length) {
+    mediaInput.value = "";
+    return;
+  }
+  if (shouldAppend) {
+    appendFiles(list);
+  } else {
+    setFiles(list);
+  }
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {

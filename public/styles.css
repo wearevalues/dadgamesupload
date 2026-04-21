@@ -187,6 +187,42 @@ label {
   font-size: 1rem;
 }
 
+.hint-sub {
+  display: block;
+  margin-top: 0.45rem;
+  font-size: 0.88em;
+  opacity: 0.88;
+  line-height: 1.35;
+}
+
+.media-actions {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  align-items: center;
+}
+
+.text-link-btn {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.95rem;
+  padding: 0.15rem 0;
+}
+
+.text-link-btn:hover {
+  opacity: 0.85;
+}
+
+.text-link-btn:active {
+  opacity: 0.75;
+}
+
 .hint strong {
   color: var(--text);
 }

@@ -22,7 +22,12 @@
             <label for="mediaInput">Photo or Video</label>
             <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-controls="mediaInput">
               <div class="icon">↑</div>
-              <p class="hint"><strong>Tap, click, or drag files here</strong><br />Supports photos and videos</p>
+              <p class="hint">
+                <strong>Tap, click, or drag files here</strong><br />Supports photos and videos.<br /><span
+                  class="hint-sub"
+                  >If your phone will not confirm many items at once, pick a few, then use <strong>Add more</strong>.</span
+                >
+              </p>
             </div>
             <!-- No accept= : iOS Safari can mis-validate HEIC/stream types against accept and block upload. We filter in JS + server. -->
             <input id="mediaInput" type="file" multiple hidden />
@@ -30,6 +35,10 @@
               <p>No media selected yet.</p>
             </div>
             <ul id="selectedList" class="selected-list" aria-live="polite"></ul>
+            <div class="media-actions" role="group" aria-label="Adjust selection">
+              <button type="button" class="text-link-btn" id="addMoreMediaBtn">Add more</button>
+              <button type="button" class="text-link-btn" id="clearMediaBtn">Clear all</button>
+            </div>
             <div id="error" class="error" aria-live="polite"></div>
           </div>
 
@@ -64,6 +73,6 @@
       </section>
     </main>
 
-    <script type="module" src="/uploader.mjs?v=blob-ingest-2"></script>
+    <script type="module" src="/uploader.mjs?v=picker-native-1"></script>
   </body>
 </html>
