@@ -1047,6 +1047,8 @@ app.use((err, req, res, next) => {
 
 if (isVercel) {
   module.exports = app;
+  // Allow long Blob → Google Drive commits (especially videos) on serverless.
+  module.exports.config = { maxDuration: 300 };
 } else {
   storageReady
     .then(() => {

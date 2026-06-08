@@ -1,4 +1,4 @@
-import { upload as blobUpload } from "https://esm.sh/@vercel/blob@2.3.1/client";
+import { upload as blobUpload } from "/vercel-blob-client.mjs";
 
 const dropzone = document.getElementById("dropzone");
 const mediaInput = document.getElementById("mediaInput");
@@ -225,8 +225,42 @@ async function parseApiJson(res) {
 /** Vercel (and similar) limit for one multipart request — stay under with encoding overhead. */
 const MAX_PROXY_UPLOAD_BYTES = 3.4 * 1024 * 1024;
 
-/** Fewer files per request avoids serverless timeouts (especially Drive + Blob commit). Must stay ≤ server limit of 10. */
-const MAX_FILES_PER_UPLOAD_BATCH = 5;
+const UPLOAD_RETRY_ATTEMPTS = 3;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNetworkError(err) {
+  if (err instanceof TypeError) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /failed to fetch|networkerror|load failed|network request failed/i.test(msg);
+}
+
+function friendlyUploadError(err, step) {
+  if (isNetworkError(err)) {
+    return new Error(
+      `Connection lost while ${step}. Stay on this page, check your signal, and tap Upload again. Large videos can take a few minutes on cellular.`
+    );
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+async function withRetry(stepLabel, fn) {
+  let lastErr;
+  for (let attempt = 1; attempt <= UPLOAD_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isNetworkError(err) || attempt === UPLOAD_RETRY_ATTEMPTS) {
+        throw friendlyUploadError(err, stepLabel);
+      }
+      await sleep(1000 * attempt);
+    }
+  }
+  throw friendlyUploadError(lastErr, stepLabel);
+}
 
 /** True for iPhone/iPod, iPad (including iPadOS “desktop” Safari UA), and similar. */
 function isIosDevice() {
@@ -273,26 +307,20 @@ function totalFileBytes(files) {
   return files.reduce((s, f) => s + f.size, 0);
 }
 
-function chunkFiles(files, chunkSize) {
-  const out = [];
-  for (let i = 0; i < files.length; i += chunkSize) {
-    out.push(files.slice(i, i + chunkSize));
-  }
-  return out;
-}
-
 async function uploadOneBatch(name, project, files, destSettings) {
   const provider = destSettings?.destination?.provider;
   if (provider === "google-drive") {
     return uploadToGoogleDrive(name, project, files, destSettings);
   }
-  const formData = new FormData();
-  files.forEach((file) => formData.append("media", file));
-  formData.append("name", name);
-  formData.append("project", project);
-  const res = await fetch("/api/upload", { method: "POST", body: formData });
-  const data = await parseApiJson(res);
-  return { fileCount: data.fileCount, destination: data.destination };
+  return withRetry("uploading your files", async () => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("media", file));
+    formData.append("name", name);
+    formData.append("project", project);
+    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    const data = await parseApiJson(res);
+    return { fileCount: data.fileCount, destination: data.destination };
+  });
 }
 
 async function compressImageFileForUpload(file, maxEdge, jpegQuality) {
@@ -343,13 +371,15 @@ async function shrinkImagesToFitVercelLimit(files, maxTotal) {
 }
 
 async function uploadGoogleDriveViaServer(name, project, files) {
-  const formData = new FormData();
-  files.forEach((file) => formData.append("media", file));
-  formData.append("name", name);
-  formData.append("project", project);
-  const res = await fetch("/api/upload", { method: "POST", body: formData });
-  const data = await parseApiJson(res);
-  return { fileCount: data.fileCount, destination: data.destination };
+  return withRetry("uploading through the site", async () => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append("media", file));
+    formData.append("name", name);
+    formData.append("project", project);
+    const res = await fetch("/api/upload", { method: "POST", body: formData });
+    const data = await parseApiJson(res);
+    return { fileCount: data.fileCount, destination: data.destination };
+  });
 }
 
 /** Browser → Google resumable PUT (works on many desktops; often blocked on iOS Safari). */
@@ -424,37 +454,42 @@ async function uploadGoogleDriveViaBlob(name, project, files) {
   const prefix = "media-uploader/incoming";
   let uploadedCount = 0;
   let destination = "google-drive";
+  const multipartThreshold = isIosDevice() ? 2 * 1024 * 1024 : 6 * 1024 * 1024;
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const orig = file.name || `upload_${i + 1}`;
     const safeSeg = orig.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180);
     const pathname = `${prefix}/${uploadBatchId}/${i + 1}-${safeSeg}`;
-    const useMultipart = file.size > 6 * 1024 * 1024;
-    const newBlob = await blobUpload(pathname, file, {
-      access: "public",
-      handleUploadUrl: "/api/media/blob-client",
-      clientPayload: JSON.stringify({
-        name,
-        project,
-        originalFilename: orig,
-        fileIndex: i + 1
-      }),
-      multipart: useMultipart
-    });
+    const useMultipart = file.size > multipartThreshold;
 
-    // Commit each file individually to keep each serverless invocation short.
-    const res = await fetch("/api/media/blob-commit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        project,
-        uploadBatchId,
-        files: [{ url: newBlob.url, originalFilename: orig }]
+    const newBlob = await withRetry(`uploading ${orig}`, () =>
+      blobUpload(pathname, file, {
+        access: "public",
+        handleUploadUrl: "/api/media/blob-client",
+        clientPayload: JSON.stringify({
+          name,
+          project,
+          originalFilename: orig,
+          fileIndex: i + 1
+        }),
+        multipart: useMultipart
       })
+    );
+
+    const data = await withRetry(`saving ${orig} to Google Drive`, async () => {
+      const res = await fetch("/api/media/blob-commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          project,
+          uploadBatchId,
+          files: [{ url: newBlob.url, originalFilename: orig }]
+        })
+      });
+      return parseApiJson(res);
     });
-    const data = await parseApiJson(res);
     uploadedCount += data.fileCount || 1;
     destination = data.destination || destination;
   }
@@ -666,19 +701,18 @@ form.addEventListener("submit", async (event) => {
   errorEl.textContent = "";
 
   try {
-    const destSettings = await fetchSettingsFresh();
-    const batches = chunkFiles(selectedFiles, MAX_FILES_PER_UPLOAD_BATCH);
+    const destSettings = await withRetry("starting the upload", fetchSettingsFresh);
+    const total = selectedFiles.length;
     let uploadedTotal = 0;
     let lastDestination = "";
 
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
+    for (let i = 0; i < total; i++) {
+      const file = selectedFiles[i];
+      const label = file.name || `file ${i + 1}`;
       statusEl.textContent =
-        batches.length > 1
-          ? `Uploading batch ${i + 1} of ${batches.length} (${batch.length} file${batch.length === 1 ? "" : "s"})…`
-          : "Uploading…";
+        total > 1 ? `Uploading file ${i + 1} of ${total}: ${label}…` : `Uploading ${label}…`;
 
-      const data = await uploadOneBatch(name, project, batch, destSettings);
+      const data = await uploadOneBatch(name, project, [file], destSettings);
       uploadedTotal += data.fileCount;
       lastDestination = data.destination;
     }

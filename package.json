@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "node --check server.js"
+    "build": "node --check server.js && esbuild node_modules/@vercel/blob/dist/client.js --bundle --format=esm --outfile=public/vercel-blob-client.mjs --platform=browser --define:global=globalThis"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.1",
@@ -14,5 +14,8 @@
     "express": "^4.21.2",
     "googleapis": "^150.0.1",
     "multer": "^2.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   }
 }
