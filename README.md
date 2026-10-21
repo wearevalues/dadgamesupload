@@ -27,6 +27,20 @@ If either project is also connected to this repo in Vercel → Settings → Git,
 
 Environment variable changes only take effect after a redeploy.
 
+## Handling a crowd
+
+- **Google Drive is the bottleneck.** Every file goes through one service account, and Drive only allows a few writes per second per account. The server retries rate-limit errors with backoff, and the browser retries on top of that, so a busy moment slows uploads down instead of failing them. Drive also caps each account at about 750 GB of uploads per day.
+- **Add projects in admin before an event.** That creates the Drive folder ahead of time, so the first wave of uploads doesn't race to create it.
+- The public page and `/api/settings` are cached at Vercel's edge for 60 seconds, so a crowd loading the page doesn't hit the server or Blob storage each time. Admin changes take about a minute to show.
+
+Before a big event, load-test a deployment:
+
+```bash
+node scripts/load-test.mjs --url https://your-site.vercel.app --users 50 --files 5 --project "Load Test"
+```
+
+Real files land in Drive under that project, so delete the "Load Test" folder afterwards.
+
 ## Running locally
 
 ```bash

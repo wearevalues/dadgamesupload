@@ -839,7 +839,7 @@ form.addEventListener("submit", async (event) => {
       writeStored(STORAGE_KEYS.accessCode, currentAccessCode);
     }
 
-    const destSettings = await withRetry("starting the upload", fetchSettingsFresh);
+    const destSettings = settingsCache || (await withRetry("starting the upload", fetchSettingsFresh));
     const queue = selectedFiles.slice();
     const total = queue.length;
     const uploadBatchId = newBatchId();

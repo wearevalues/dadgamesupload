@@ -201,7 +201,7 @@ settingsForm.addEventListener("submit", async (event) => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Save failed.");
-    setStatus("Saved. Refresh the uploader tab to see updates.");
+    setStatus("Saved. The public page picks up changes within about a minute.");
   } catch (error) {
     setStatus(error.message || "Could not save settings.", true);
   }

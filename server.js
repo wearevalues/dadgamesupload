@@ -153,7 +153,7 @@ async function writeSettingsBlob(payload) {
 }
 
 let settingsCache = { at: 0, value: null };
-const SETTINGS_CACHE_MS = 15 * 1000;
+const SETTINGS_CACHE_MS = 60 * 1000;
 
 async function readSettings() {
   if (settingsCache.value && Date.now() - settingsCache.at < SETTINGS_CACHE_MS) {
@@ -226,6 +226,10 @@ function buildUploaderHeadHtml(settings, canonicalUrl) {
   return `    ${lines.join("\n    ")}`;
 }
 
+// Vercel's CDN serves these for 60s (then refreshes in the background), so a crowd loading the
+// page doesn't each run the function. Admin changes show up within about a minute.
+const PUBLIC_CDN_CACHE = "public, max-age=0, s-maxage=60, stale-while-revalidate=600";
+
 let cachedUploaderIndexTemplate = null;
 async function getUploaderIndexTemplate() {
   if (!cachedUploaderIndexTemplate) {
@@ -247,6 +251,7 @@ async function sendUploaderIndexHtml(req, res, next) {
       return next();
     }
     const html = tpl.replace(marker, buildUploaderHeadHtml(settings, canonicalUrl));
+    res.set("Cache-Control", PUBLIC_CDN_CACHE);
     res.type("html").send(html);
   } catch (err) {
     next(err);
@@ -340,6 +345,29 @@ async function listRecentSubmissions(limit) {
     })
   );
   return entries.filter(Boolean);
+}
+
+/** Files are committed one at a time, so merge records from the same submit into one row. */
+function groupSubmissionsByBatch(entries) {
+  const groups = new Map();
+  const out = [];
+  for (const entry of entries) {
+    const key = entry.uploadBatchId;
+    if (!key) {
+      out.push(entry);
+      continue;
+    }
+    const existing = groups.get(key);
+    if (existing) {
+      existing.fileCount = (Number(existing.fileCount) || 0) + (Number(entry.fileCount) || 0);
+      if (entry.timestamp < existing.timestamp) existing.timestamp = entry.timestamp;
+    } else {
+      const copy = { ...entry };
+      groups.set(key, copy);
+      out.push(copy);
+    }
+  }
+  return out;
 }
 
 /** Match a typed project to an existing one ignoring case/spacing; null when custom names are off. */
@@ -473,6 +501,30 @@ async function uploadFileToGoogleDrive(file, folderId, targetName) {
   return response.data;
 }
 
+/** Drive allows only a few writes/sec per account; under load it answers 403 rate-limit, 429 or 5xx. */
+function isRetryableDriveError(err) {
+  const status = Number(err?.code ?? err?.status ?? err?.response?.status);
+  const reason = String(
+    err?.errors?.[0]?.reason || err?.response?.data?.error?.errors?.[0]?.reason || ""
+  );
+  if (status === 429 || status >= 500) return true;
+  if (status === 403 && /rateLimitExceeded|userRateLimitExceeded/i.test(reason)) return true;
+  return /ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err?.message || "");
+}
+
+async function withDriveRetry(fn, attempts = 6) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= attempts || !isRetryableDriveError(err)) throw err;
+      // Exponential backoff with jitter so a burst of uploads doesn't retry in lockstep.
+      const delay = Math.min(16000, 1000 * 2 ** (attempt - 1)) + Math.random() * 1000;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 async function uploadReadableToGoogleDrive(nodeReadable, folderId, targetName, mimeType) {
   const drive = getDriveClient();
   const response = await drive.files.create({
@@ -540,28 +592,65 @@ async function findOrCreateDriveFolder(parentFolderId, folderName) {
   const drive = getDriveClient();
   const folderQuery = `name='${escapeDriveQueryString(folderName)}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`;
 
-  const listRes = await drive.files.list({
-    q: folderQuery,
-    fields: "files(id,name)",
-    pageSize: 10,
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true
-  });
+  const listRes = await withDriveRetry(() =>
+    drive.files.list({
+      q: folderQuery,
+      fields: "files(id,name)",
+      pageSize: 10,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true
+    })
+  );
 
   const existing = listRes.data.files && listRes.data.files[0];
   if (existing && existing.id) return existing.id;
 
-  const createRes = await drive.files.create({
-    requestBody: {
-      name: folderName,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentFolderId]
-    },
-    fields: "id",
-    supportsAllDrives: true
-  });
+  const createRes = await withDriveRetry(() =>
+    drive.files.create({
+      requestBody: {
+        name: folderName,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [parentFolderId]
+      },
+      fields: "id",
+      supportsAllDrives: true
+    })
+  );
 
   return createRes.data.id;
+}
+
+function projectFolderKey(parentFolderId, folderName) {
+  return `${parentFolderId}/${folderName.toLowerCase()}`;
+}
+
+/**
+ * Folder IDs saved in settings (created when admins add projects) avoid a Drive lookup per upload
+ * and stop parallel first uploads from creating duplicate folders across serverless instances.
+ */
+async function projectFolderIdFor(settings, parentFolderId, folderName) {
+  const saved = settings.projectFolders?.[projectFolderKey(parentFolderId, folderName)];
+  if (saved) return saved;
+  return getOrCreateDriveFolder(parentFolderId, folderName);
+}
+
+/** Best-effort: create Drive folders for every project and return the id map to save. */
+async function ensureProjectFolders(settings) {
+  const parent = settings.destination?.driveFolderId || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
+  const folders = { ...(settings.projectFolders || {}) };
+  if (settings.destination?.provider !== "google-drive" || !parent) return folders;
+  for (const project of settings.projects || []) {
+    const folderName = sanitizeDriveFolderName(project);
+    if (!folderName) continue;
+    const key = projectFolderKey(parent, folderName);
+    if (folders[key]) continue;
+    try {
+      folders[key] = await getOrCreateDriveFolder(parent, folderName);
+    } catch (err) {
+      console.error("ensureProjectFolders:", folderName, err.message);
+    }
+  }
+  return folders;
 }
 
 function requireAdmin(req, res, next) {
@@ -658,10 +747,11 @@ app.get(["/", "/index.html"], sendUploaderIndexHtml);
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/settings", async (_req, res) => {
-  res.set("Cache-Control", "no-store");
+  res.set("Cache-Control", PUBLIC_CDN_CACHE);
   const settings = await readSettings();
+  const { projectFolders: _folders, ...publicSettings } = settings;
   res.json({
-    ...settings,
+    ...publicSettings,
     client: {
       requiresAccessCode: Boolean(UPLOAD_ACCESS_CODE),
       blobDriveUpload:
@@ -707,7 +797,7 @@ app.post("/api/upload/verify-code", (req, res) => {
 app.get("/api/admin/submissions", requireAdmin, async (_req, res) => {
   try {
     res.set("Cache-Control", "no-store");
-    const submissions = await listRecentSubmissions(50);
+    const submissions = groupSubmissionsByBatch(await listRecentSubmissions(300)).slice(0, 50);
     res.json({ submissions, storage: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
   } catch (e) {
     console.error("/api/admin/submissions:", e);
@@ -768,8 +858,10 @@ app.post("/api/admin/settings", requireAdmin, async (req, res) => {
     allowCustomProjects:
       typeof payload.allowCustomProjects === "boolean"
         ? payload.allowCustomProjects
-        : currentSettings.allowCustomProjects !== false
+        : currentSettings.allowCustomProjects !== false,
+    projectFolders: currentSettings.projectFolders || {}
   };
+  nextSettings.projectFolders = await ensureProjectFolders(nextSettings);
   await writeSettings(nextSettings);
   const settings = await readSettings();
   res.json({ ok: true, settings });
@@ -817,6 +909,7 @@ app.post("/api/admin/projects/add", requireAdmin, async (req, res) => {
 
   const nextProjects = [...existing, projectRaw].slice(0, 200);
   const nextSettings = { ...current, projects: nextProjects };
+  nextSettings.projectFolders = await ensureProjectFolders(nextSettings);
 
   await writeSettings(nextSettings);
   const updated = await readSettings();
@@ -879,7 +972,7 @@ app.post("/api/upload/drive-session", express.json({ limit: "32kb" }), async (re
     }
 
     const projectFolderName = sanitizeDriveFolderName(project);
-    const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+    const projectFolderId = await projectFolderIdFor(settings, folderId, projectFolderName);
     const safeProjectPart = sanitizePart(projectFolderName) || "project";
     const safeName = sanitizePart(name) || "anon";
     const safeOriginal = originalFilename.replace(/[^\w.-]/g, "_");
@@ -979,7 +1072,7 @@ app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req,
     }
 
     const projectFolderName = sanitizeDriveFolderName(project);
-    const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+    const projectFolderId = await projectFolderIdFor(settings, folderId, projectFolderName);
     const safeProjectPart = sanitizePart(projectFolderName) || "project";
     const safeName = sanitizePart(name) || "anon";
     const uploadedDriveFiles = [];
@@ -996,30 +1089,32 @@ app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req,
         return res.status(400).json({ error: "Upload batch does not match blob URL." });
       }
 
-      const blobRes = await fetch(url);
-      if (!blobRes.ok) {
-        return res.status(400).json({ error: `Could not read file from Blob storage (${blobRes.status}).` });
-      }
-
-      const mimeType = blobRes.headers.get("content-type") || inferMimeFromName(originalFilename, "");
       const safeOriginal = originalFilename.replace(/[^\w.-]/g, "_");
       const entryIndex = parseInt(entry?.fileIndex, 10);
       const fileNumber = Number.isFinite(entryIndex) && entryIndex > 0 ? entryIndex : i + 1;
       const targetName = `${safeProjectPart}_${safeName}_${uploadBatchId}_${fileNumber}_${safeOriginal}`;
 
-      let nodeStream;
-      if (blobRes.body && typeof Readable.fromWeb === "function") {
-        nodeStream = Readable.fromWeb(blobRes.body, { highWaterMark: 1024 * 1024 });
-      } else {
-        const buf = Buffer.from(await blobRes.arrayBuffer());
-        nodeStream = Readable.from(buf);
-      }
-
       let driveFile;
       try {
-        driveFile = await uploadReadableToGoogleDrive(nodeStream, projectFolderId, targetName, mimeType);
+        // A stream can only be read once, so each retry re-downloads the file from Blob.
+        driveFile = await withDriveRetry(async () => {
+          const blobRes = await fetch(url);
+          if (!blobRes.ok) {
+            const err = new Error(`Could not read file from Blob storage (${blobRes.status}).`);
+            err.status = blobRes.status >= 500 ? 503 : 400;
+            throw err;
+          }
+          const mimeType = blobRes.headers.get("content-type") || inferMimeFromName(originalFilename, "");
+          const nodeStream =
+            blobRes.body && typeof Readable.fromWeb === "function"
+              ? Readable.fromWeb(blobRes.body, { highWaterMark: 1024 * 1024 })
+              : Readable.from(Buffer.from(await blobRes.arrayBuffer()));
+          return uploadReadableToGoogleDrive(nodeStream, projectFolderId, targetName, mimeType);
+        });
       } catch (uploadErr) {
-        return res.status(500).json({ error: `Google Drive upload failed: ${uploadErr.message}` });
+        // 503 tells the browser to try again later; anything else is a real failure.
+        const status = uploadErr.status === 400 ? 400 : isRetryableDriveError(uploadErr) ? 503 : 500;
+        return res.status(status).json({ error: `Google Drive upload failed: ${uploadErr.message}` });
       }
 
       uploadedDriveFiles.push({
@@ -1043,7 +1138,8 @@ app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req,
       destination: "google-drive",
       fileCount: uploadedDriveFiles.length,
       fileNames: uploadedDriveFiles.map((f) => f.name),
-      fileRefs: uploadedDriveFiles.map((f) => f.id)
+      fileRefs: uploadedDriveFiles.map((f) => f.id),
+      uploadBatchId
     });
 
     return res.json({
@@ -1143,12 +1239,12 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
       try {
         const uploaded = [];
         const projectFolderName = sanitizeDriveFolderName(project);
-        const projectFolderId = await getOrCreateDriveFolder(folderId, projectFolderName);
+        const projectFolderId = await projectFolderIdFor(settings, folderId, projectFolderName);
         const safeProjectPart = sanitizePart(projectFolderName) || "project";
         for (const [index, file] of files.entries()) {
           const safeOriginal = file.originalname.replace(/[^\w.-]/g, "_");
           const targetName = `${safeProjectPart}_${safeName}_${uploadToken}_${index + 1}_${safeOriginal}`;
-          const driveFile = await uploadFileToGoogleDrive(file, projectFolderId, targetName);
+          const driveFile = await withDriveRetry(() => uploadFileToGoogleDrive(file, projectFolderId, targetName));
           uploaded.push({
             id: driveFile.id,
             name: driveFile.name,
