@@ -216,16 +216,24 @@ async function parseApiJson(res) {
     } else if (!res.ok) {
       hint = `Request failed (HTTP ${res.status}). Please try again.`;
     }
-    throw new Error(hint);
+    const hintErr = new Error(hint);
+    hintErr.retryable = res.status === 408 || res.status === 429 || res.status >= 500;
+    throw hintErr;
   }
-  if (!res.ok) throw new Error(data.error || "Request failed.");
+  if (!res.ok) {
+    const err = new Error(data.error || "Request failed.");
+    err.retryable = res.status === 408 || res.status === 429 || res.status >= 500;
+    throw err;
+  }
   return data;
 }
 
 /** Vercel (and similar) limit for one multipart request — stay under with encoding overhead. */
 const MAX_PROXY_UPLOAD_BYTES = 3.4 * 1024 * 1024;
 
-const UPLOAD_RETRY_ATTEMPTS = 3;
+const UPLOAD_RETRY_ATTEMPTS = 4;
+/** Files uploaded at the same time (after the first, which creates the Drive project folder). */
+const UPLOAD_CONCURRENCY = 3;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -253,10 +261,11 @@ async function withRetry(stepLabel, fn) {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (!isNetworkError(err) || attempt === UPLOAD_RETRY_ATTEMPTS) {
+      const canRetry = isNetworkError(err) || err?.retryable;
+      if (!canRetry || attempt === UPLOAD_RETRY_ATTEMPTS) {
         throw friendlyUploadError(err, stepLabel);
       }
-      await sleep(1000 * attempt);
+      await sleep(1500 * 2 ** (attempt - 1));
     }
   }
   throw friendlyUploadError(lastErr, stepLabel);
@@ -307,10 +316,14 @@ function totalFileBytes(files) {
   return files.reduce((s, f) => s + f.size, 0);
 }
 
-async function uploadOneBatch(name, project, files, destSettings) {
+function newBatchId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+async function uploadOneBatch(name, project, files, destSettings, ctx) {
   const provider = destSettings?.destination?.provider;
   if (provider === "google-drive") {
-    return uploadToGoogleDrive(name, project, files, destSettings);
+    return uploadToGoogleDrive(name, project, files, destSettings, ctx);
   }
   return withRetry("uploading your files", async () => {
     const formData = new FormData();
@@ -449,8 +462,7 @@ async function uploadDriveResumableDirect(name, project, files) {
   return { fileCount: uploadedMeta.length, destination: "google-drive" };
 }
 
-async function uploadGoogleDriveViaBlob(name, project, files) {
-  const uploadBatchId = `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+async function uploadGoogleDriveViaBlob(name, project, files, uploadBatchId, startIndex = 0) {
   const prefix = "media-uploader/incoming";
   let uploadedCount = 0;
   let destination = "google-drive";
@@ -458,9 +470,10 @@ async function uploadGoogleDriveViaBlob(name, project, files) {
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    const orig = file.name || `upload_${i + 1}`;
+    const fileNumber = startIndex + i + 1;
+    const orig = file.name || `upload_${fileNumber}`;
     const safeSeg = orig.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180);
-    const pathname = `${prefix}/${uploadBatchId}/${i + 1}-${safeSeg}`;
+    const pathname = `${prefix}/${uploadBatchId}/${fileNumber}-${safeSeg}`;
     const useMultipart = file.size > multipartThreshold;
 
     const newBlob = await withRetry(`uploading ${orig}`, () =>
@@ -471,9 +484,13 @@ async function uploadGoogleDriveViaBlob(name, project, files) {
           name,
           project,
           originalFilename: orig,
-          fileIndex: i + 1
+          fileIndex: fileNumber
         }),
         multipart: useMultipart
+      }).catch((err) => {
+        // Blob SDK errors are not always network errors; retry them all.
+        if (err && typeof err === "object") err.retryable = true;
+        throw err;
       })
     );
 
@@ -485,7 +502,7 @@ async function uploadGoogleDriveViaBlob(name, project, files) {
           name,
           project,
           uploadBatchId,
-          files: [{ url: newBlob.url, originalFilename: orig }]
+          files: [{ url: newBlob.url, originalFilename: orig, fileIndex: fileNumber }]
         })
       });
       return parseApiJson(res);
@@ -497,11 +514,17 @@ async function uploadGoogleDriveViaBlob(name, project, files) {
   return { fileCount: uploadedCount, destination };
 }
 
-async function uploadToGoogleDrive(name, project, files, settingsForUpload) {
+async function uploadToGoogleDrive(name, project, files, settingsForUpload, ctx = {}) {
   const blobOk =
     settingsForUpload?.client?.blobDriveUpload ?? settingsCache?.client?.blobDriveUpload;
   if (blobOk) {
-    return uploadGoogleDriveViaBlob(name, project, files);
+    return uploadGoogleDriveViaBlob(
+      name,
+      project,
+      files,
+      ctx.uploadBatchId || newBatchId(),
+      ctx.startIndex || 0
+    );
   }
 
   if (isIosDevice()) {
@@ -702,22 +725,55 @@ form.addEventListener("submit", async (event) => {
 
   try {
     const destSettings = await withRetry("starting the upload", fetchSettingsFresh);
-    const total = selectedFiles.length;
+    const queue = selectedFiles.slice();
+    const total = queue.length;
+    const uploadBatchId = newBatchId();
     let uploadedTotal = 0;
+    let doneCount = 0;
     let lastDestination = "";
+    const succeeded = new Set();
+    const failures = [];
 
-    for (let i = 0; i < total; i++) {
-      const file = selectedFiles[i];
-      const label = file.name || `file ${i + 1}`;
-      statusEl.textContent =
-        total > 1 ? `Uploading file ${i + 1} of ${total}: ${label}…` : `Uploading ${label}…`;
+    const uploadFile = async (file, index) => {
+      try {
+        const data = await uploadOneBatch(name, project, [file], destSettings, {
+          uploadBatchId,
+          startIndex: index
+        });
+        uploadedTotal += data.fileCount;
+        lastDestination = data.destination;
+        succeeded.add(file);
+      } catch (err) {
+        failures.push({ file, message: err instanceof Error ? err.message : String(err) });
+      } finally {
+        doneCount += 1;
+        statusEl.textContent = `Uploaded ${doneCount} of ${total}…`;
+      }
+    };
 
-      const data = await uploadOneBatch(name, project, [file], destSettings);
-      uploadedTotal += data.fileCount;
-      lastDestination = data.destination;
+    statusEl.textContent = total > 1 ? `Uploading 1 of ${total}…` : `Uploading ${queue[0].name || "file"}…`;
+    // First file alone so the Drive project folder is created once, then the rest in parallel.
+    await uploadFile(queue[0], 0);
+    let next = 1;
+    const worker = async () => {
+      while (next < total) {
+        const index = next++;
+        await uploadFile(queue[index], index);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, total - 1) }, worker));
+
+    // Keep only failed files selected so tapping Upload again never re-sends finished ones.
+    if (failures.length) {
+      selectedFiles = selectedFiles.filter((f) => !succeeded.has(f));
+      renderPreview();
+      errorEl.textContent = `${failures.length} of ${total} file(s) failed: ${failures[0].message} Tap Upload to retry just those.`;
+      statusEl.textContent = uploadedTotal ? `Uploaded ${uploadedTotal} file(s) to ${lastDestination}.` : "";
+    } else {
+      selectedFiles = [];
+      renderPreview();
+      statusEl.textContent = `Uploaded ${uploadedTotal} file(s) to ${lastDestination}.`;
     }
-
-    statusEl.textContent = `Uploaded ${uploadedTotal} file(s) to ${lastDestination}.`;
   } catch (error) {
     errorEl.textContent = error instanceof Error ? error.message : "Upload failed.";
     statusEl.textContent = "";

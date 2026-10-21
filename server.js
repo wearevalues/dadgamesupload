@@ -132,7 +132,19 @@ async function writeSettingsBlob(payload) {
   }
 }
 
+let settingsCache = { at: 0, value: null };
+const SETTINGS_CACHE_MS = 15 * 1000;
+
 async function readSettings() {
+  if (settingsCache.value && Date.now() - settingsCache.at < SETTINGS_CACHE_MS) {
+    return settingsCache.value;
+  }
+  const fresh = await readSettingsUncached();
+  settingsCache = { at: Date.now(), value: fresh };
+  return fresh;
+}
+
+async function readSettingsUncached() {
   let parsed = null;
   if (process.env.BLOB_READ_WRITE_TOKEN) {
     parsed = await readSettingsBlob();
@@ -222,6 +234,7 @@ async function sendUploaderIndexHtml(req, res, next) {
 }
 
 async function writeSettings(next) {
+  settingsCache = { at: 0, value: null };
   await fsp.writeFile(settingsPath, JSON.stringify(next, null, 2), "utf8");
   await writeSettingsBlob(next);
 }
@@ -278,14 +291,17 @@ function resolveServiceAccount() {
   throw new Error("Google service account credentials are not configured.");
 }
 
+let cachedDriveClient = null;
 function getDriveClient() {
+  if (cachedDriveClient) return cachedDriveClient;
   const serviceAccount = resolveServiceAccount();
   const auth = new google.auth.JWT({
     email: serviceAccount.client_email,
     key: serviceAccount.private_key,
     scopes: ["https://www.googleapis.com/auth/drive"]
   });
-  return google.drive({ version: "v3", auth });
+  cachedDriveClient = google.drive({ version: "v3", auth });
+  return cachedDriveClient;
 }
 
 const MIME_BY_EXT = {
@@ -414,7 +430,28 @@ function escapeDriveQueryString(value) {
   return (value || "").toString().replace(/'/g, "\\'");
 }
 
+const driveFolderIdCache = new Map();
+const driveFolderInflight = new Map();
+
 async function getOrCreateDriveFolder(parentFolderId, folderName) {
+  const key = `${parentFolderId}/${folderName}`;
+  if (driveFolderIdCache.has(key)) return driveFolderIdCache.get(key);
+  // Concurrent requests on one instance share a single lookup/create.
+  if (!driveFolderInflight.has(key)) {
+    driveFolderInflight.set(
+      key,
+      findOrCreateDriveFolder(parentFolderId, folderName)
+        .then((id) => {
+          driveFolderIdCache.set(key, id);
+          return id;
+        })
+        .finally(() => driveFolderInflight.delete(key))
+    );
+  }
+  return driveFolderInflight.get(key);
+}
+
+async function findOrCreateDriveFolder(parentFolderId, folderName) {
   const drive = getDriveClient();
   const folderQuery = `name='${escapeDriveQueryString(folderName)}' and mimeType='application/vnd.google-apps.folder' and '${parentFolderId}' in parents and trashed=false`;
 
@@ -801,7 +838,9 @@ app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req,
 
       const mimeType = blobRes.headers.get("content-type") || inferMimeFromName(originalFilename, "");
       const safeOriginal = originalFilename.replace(/[^\w.-]/g, "_");
-      const targetName = `${safeProjectPart}_${safeName}_${uploadBatchId}_${i + 1}_${safeOriginal}`;
+      const entryIndex = parseInt(entry?.fileIndex, 10);
+      const fileNumber = Number.isFinite(entryIndex) && entryIndex > 0 ? entryIndex : i + 1;
+      const targetName = `${safeProjectPart}_${safeName}_${uploadBatchId}_${fileNumber}_${safeOriginal}`;
 
       let nodeStream;
       if (blobRes.body && typeof Readable.fromWeb === "function") {
@@ -1046,9 +1085,8 @@ app.use((err, req, res, next) => {
 });
 
 if (isVercel) {
+  // maxDuration for long Blob → Drive commits is set in vercel.json (a config export is ignored for Express).
   module.exports = app;
-  // Allow long Blob → Google Drive commits (especially videos) on serverless.
-  module.exports.config = { maxDuration: 300 };
 } else {
   storageReady
     .then(() => {
