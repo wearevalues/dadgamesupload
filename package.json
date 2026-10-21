@@ -6,6 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "dev": "node --env-file-if-exists=.env server.js",
     "build": "node --check server.js && esbuild node_modules/@vercel/blob/dist/client.js --bundle --format=esm --outfile=public/vercel-blob-client.mjs --platform=browser --define:global=globalThis"
   },
   "dependencies": {

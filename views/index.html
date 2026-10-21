@@ -61,6 +61,19 @@
             />
           </div>
 
+          <div id="accessCodeField" class="field hidden">
+            <label for="accessCodeInput">Access Code</label>
+            <input
+              id="accessCodeInput"
+              class="input"
+              type="text"
+              name="accessCode"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+          </div>
+
           <div class="field">
             <label for="projectSelect">Project</label>
             <select id="projectSelect" class="input" name="project" aria-required="true">
@@ -75,9 +88,16 @@
           </button>
           <p id="status" class="status" aria-live="polite"></p>
         </form>
+
+        <div id="doneState" class="done-state hidden" role="status" aria-live="polite">
+          <div class="done-check" aria-hidden="true">✓</div>
+          <h2 id="doneTitle">All uploaded</h2>
+          <p id="doneDetail" class="subhead"></p>
+          <button type="button" class="submit" id="uploadMoreBtn"><span class="btn-text">Upload more</span></button>
+        </div>
       </section>
     </main>
 
-    <script type="module" src="/uploader.mjs?v=upload-reliability-1"></script>
+    <script type="module" src="/uploader.mjs?v=upload-reliability-2"></script>
   </body>
 </html>

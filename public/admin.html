@@ -61,8 +61,16 @@
           </div>
           <button id="addProjectBtn" class="submit admin-btn" type="button"><span class="btn-text">Add Project</span></button>
           <ul id="projectList" class="project-list" aria-live="polite"></ul>
+          <label class="checkbox-row">
+            <input id="allowCustomProjectsInput" type="checkbox" />
+            Let uploaders type a new project name ("Other")
+          </label>
 
           <button class="submit admin-btn" type="submit"><span class="btn-text">Save Settings</span></button>
+
+          <h2>Recent Uploads</h2>
+          <button id="refreshSubmissionsBtn" class="text-link-btn" type="button">Refresh</button>
+          <ul id="submissionList" class="project-list submission-list" aria-live="polite"></ul>
         </form>
 
         <p id="adminStatus" class="status"></p>

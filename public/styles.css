@@ -287,6 +287,67 @@ label {
   gap: 6px;
 }
 
+.selected-list li.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-row .file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-row .file-state {
+  font-size: 0.82rem;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+
+.file-row.is-done .file-state {
+  color: #2d6a37;
+  opacity: 1;
+}
+
+.file-row.is-failed {
+  border-color: var(--danger);
+}
+
+.file-row.is-failed .file-state {
+  color: var(--danger);
+  opacity: 1;
+}
+
+.file-remove-btn {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.file-remove-btn:disabled {
+  visibility: hidden;
+}
+
+.done-state {
+  text-align: center;
+  padding: 12px 0 4px;
+}
+
+.done-check {
+  font-size: 2.4rem;
+  line-height: 1;
+  color: #2d6a37;
+  margin-bottom: 8px;
+}
+
 .selected-list li {
   background: #ebebeb;
   border: 1px solid #d0d0d0;
@@ -492,6 +553,25 @@ label {
 
 .project-delete-btn:hover {
   background: rgba(255, 255, 255, 0.95);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  font-weight: inherit;
+}
+
+.submission-list li {
+  display: block;
+}
+
+.submission-meta {
+  display: block;
+  font-size: 0.82rem;
+  opacity: 0.7;
+  margin-top: 2px;
 }
 
 .project-empty {

@@ -8,6 +8,9 @@ let currentLogoUrl = "";
 const projectAddInput = document.getElementById("projectAddInput");
 const addProjectBtn = document.getElementById("addProjectBtn");
 const projectList = document.getElementById("projectList");
+const allowCustomProjectsInput = document.getElementById("allowCustomProjectsInput");
+const submissionList = document.getElementById("submissionList");
+const refreshSubmissionsBtn = document.getElementById("refreshSubmissionsBtn");
 
 function setStatus(message, isError = false) {
   adminStatus.textContent = message;
@@ -28,7 +31,8 @@ function buildSettingsPayload() {
     destination: {
       provider: "google-drive",
       driveFolderId: document.getElementById("driveFolderIdInput").value.trim()
-    }
+    },
+    allowCustomProjects: allowCustomProjectsInput.checked
   };
 }
 
@@ -43,7 +47,50 @@ function hydrateForm(settings) {
   document.getElementById("surfaceColorInput").value = branding.surfaceColor || "#ebebeb";
   document.getElementById("textColorInput").value = branding.textColor || "#323232";
   document.getElementById("driveFolderIdInput").value = destination.driveFolderId || "";
+  allowCustomProjectsInput.checked = settings.allowCustomProjects !== false;
 }
+
+function renderSubmissions(submissions, hasStorage) {
+  submissionList.innerHTML = "";
+  if (!submissions.length) {
+    const empty = document.createElement("li");
+    empty.className = "project-empty";
+    empty.textContent = hasStorage
+      ? "No uploads recorded yet."
+      : "Upload history needs Vercel Blob storage (BLOB_READ_WRITE_TOKEN).";
+    submissionList.appendChild(empty);
+    return;
+  }
+  submissions.forEach((s) => {
+    const li = document.createElement("li");
+    li.className = "project-pill";
+    const when = s.timestamp ? new Date(s.timestamp).toLocaleString() : "";
+    const count = Number(s.fileCount) || 0;
+    li.textContent = `${s.name || "Someone"} · ${s.project || "No project"} · ${count} file${count === 1 ? "" : "s"}`;
+    const meta = document.createElement("span");
+    meta.className = "submission-meta";
+    meta.textContent = when;
+    li.appendChild(meta);
+    submissionList.appendChild(li);
+  });
+}
+
+async function loadSubmissions() {
+  try {
+    const res = await fetch("/api/admin/submissions");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not load uploads.");
+    renderSubmissions(data.submissions || [], data.storage);
+  } catch (error) {
+    submissionList.innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "project-empty";
+    li.textContent = error.message || "Could not load uploads.";
+    submissionList.appendChild(li);
+  }
+}
+
+refreshSubmissionsBtn.addEventListener("click", loadSubmissions);
 
 function renderProjects(projects) {
   const list = Array.isArray(projects) ? projects : [];
@@ -116,6 +163,7 @@ async function showSettingsIfAuthenticated() {
     loginForm.classList.add("hidden");
     settingsForm.classList.remove("hidden");
     setStatus("Panel unlocked.");
+    loadSubmissions();
   } catch {
     loginForm.classList.remove("hidden");
     settingsForm.classList.add("hidden");

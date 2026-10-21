@@ -4,6 +4,7 @@ const multer = require("multer");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
+const crypto = require("crypto");
 const { Readable } = require("stream");
 const { google } = require("googleapis");
 const { handleUpload } = require("@vercel/blob/client");
@@ -12,10 +13,28 @@ const { del } = require("@vercel/blob");
 const app = express();
 app.set("trust proxy", 1);
 const port = process.env.PORT || 4173;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "password";
-const SESSION_SECRET = process.env.SESSION_SECRET || "replace-this-secret";
-
 const isVercel = Boolean(process.env.VERCEL);
+
+// On Vercel, admin login stays disabled until ADMIN_PASSWORD is set — never fall back to a known password.
+const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD || "").trim() || (isVercel ? "" : "password");
+const SESSION_SECRET =
+  process.env.SESSION_SECRET ||
+  crypto.createHash("sha256").update(`session:${ADMIN_PASSWORD || "local-dev"}`).digest("hex");
+
+// Optional shared code uploaders must enter. Unset = anyone with the link can upload.
+const UPLOAD_ACCESS_CODE = (process.env.UPLOAD_ACCESS_CODE || "").trim();
+const ACCESS_CODE_ERROR = "That access code isn't right. Check with whoever sent you this link.";
+
+function hasValidAccessCode(value) {
+  if (!UPLOAD_ACCESS_CODE) return true;
+  return String(value || "").trim().toLowerCase() === UPLOAD_ACCESS_CODE.toLowerCase();
+}
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a)).digest();
+  const hb = crypto.createHash("sha256").update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 const writableRoot = isVercel ? path.join(process.env.TMPDIR || "/tmp", "photo-uploader") : __dirname;
 const dataDir = path.join(writableRoot, "data");
 const uploadsDir = path.join(writableRoot, "uploads");
@@ -45,7 +64,8 @@ const defaultSettings = {
     webhookUrl: "",
     note: "Use local while building. Add API integration credentials for cloud providers."
   },
-  projects: []
+  projects: [],
+  allowCustomProjects: true
 };
 
 async function ensureStorage() {
@@ -267,6 +287,71 @@ async function appendSubmissionCsv(entry) {
     .join(",");
 
   await fsp.appendFile(submissionsCsvPath, `${row}\n`, "utf8");
+}
+
+const SUBMISSIONS_PREFIX = "media-uploader/submissions/";
+
+/** CSV in /tmp is wiped on Vercel, so each submission is also stored as a small JSON file in Blob. */
+async function recordSubmission(entry) {
+  try {
+    await appendSubmissionCsv(entry);
+  } catch (err) {
+    console.error("appendSubmissionCsv:", err.message);
+  }
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) return;
+  try {
+    const { put } = require("@vercel/blob");
+    const stamp = entry.timestamp.replace(/[:.]/g, "-");
+    const id = crypto.randomBytes(6).toString("hex");
+    await put(`${SUBMISSIONS_PREFIX}${stamp}-${id}.json`, JSON.stringify(entry), {
+      access: "public",
+      addRandomSuffix: false,
+      contentType: "application/json",
+      token
+    });
+  } catch (err) {
+    console.error("recordSubmission blob:", err.message);
+  }
+}
+
+async function listRecentSubmissions(limit) {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) return [];
+  const { list } = require("@vercel/blob");
+  const blobs = [];
+  let cursor;
+  for (let page = 0; page < 10; page++) {
+    const res = await list({ prefix: SUBMISSIONS_PREFIX, token, cursor, limit: 1000 });
+    blobs.push(...res.blobs);
+    if (!res.hasMore) break;
+    cursor = res.cursor;
+  }
+  blobs.sort((a, b) => (a.pathname < b.pathname ? 1 : -1));
+  const recent = blobs.slice(0, limit);
+  const entries = await Promise.all(
+    recent.map(async (b) => {
+      try {
+        const r = await fetch(b.url);
+        return r.ok ? await r.json() : null;
+      } catch {
+        return null;
+      }
+    })
+  );
+  return entries.filter(Boolean);
+}
+
+/** Match a typed project to an existing one ignoring case/spacing; null when custom names are off. */
+function resolveProjectName(settings, raw) {
+  const cleaned = String(raw || "").trim().replace(/\s+/g, " ");
+  if (!cleaned) return "";
+  const key = cleaned.toLowerCase();
+  const list = Array.isArray(settings.projects) ? settings.projects : [];
+  const match = list.find((p) => String(p || "").trim().replace(/\s+/g, " ").toLowerCase() === key);
+  if (match) return String(match).trim();
+  if (settings.allowCustomProjects === false) return null;
+  return cleaned;
 }
 
 function resolveServiceAccount() {
@@ -578,6 +663,7 @@ app.get("/api/settings", async (_req, res) => {
   res.json({
     ...settings,
     client: {
+      requiresAccessCode: Boolean(UPLOAD_ACCESS_CODE),
       blobDriveUpload:
         Boolean(process.env.BLOB_READ_WRITE_TOKEN) &&
         settings.destination.provider === "google-drive"
@@ -585,13 +671,79 @@ app.get("/api/settings", async (_req, res) => {
   });
 });
 
+const loginAttempts = new Map();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+
 app.post("/api/admin/login", (req, res) => {
+  if (!ADMIN_PASSWORD) {
+    return res.status(503).json({ error: "Admin is disabled: set ADMIN_PASSWORD in the Vercel project settings." });
+  }
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+  if (record && record.resetAt > now && record.count >= LOGIN_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: "Too many attempts. Try again in a few minutes." });
+  }
   const { password } = req.body || {};
-  if (password !== ADMIN_PASSWORD) {
+  if (!safeEqual(password || "", ADMIN_PASSWORD)) {
+    const next = record && record.resetAt > now ? record : { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+    next.count += 1;
+    loginAttempts.set(ip, next);
     return res.status(401).json({ error: "Invalid password." });
   }
+  loginAttempts.delete(ip);
   req.session.isAdmin = true;
   return res.json({ ok: true });
+});
+
+app.post("/api/upload/verify-code", (req, res) => {
+  if (!hasValidAccessCode(req.body?.accessCode)) {
+    return res.status(403).json({ error: ACCESS_CODE_ERROR });
+  }
+  return res.json({ ok: true });
+});
+
+app.get("/api/admin/submissions", requireAdmin, async (_req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    const submissions = await listRecentSubmissions(50);
+    res.json({ submissions, storage: Boolean(process.env.BLOB_READ_WRITE_TOKEN) });
+  } catch (e) {
+    console.error("/api/admin/submissions:", e);
+    res.status(500).json({ error: e.message || "Could not load submissions." });
+  }
+});
+
+/** Daily: delete incoming blobs whose Drive copy never finished (successful ones are deleted at commit). */
+app.get("/api/cron/cleanup-blobs", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  const authorized = secret
+    ? req.get("authorization") === `Bearer ${secret}`
+    : !isVercel || /vercel-cron/i.test(req.get("user-agent") || "");
+  if (!authorized) return res.status(401).json({ error: "Unauthorized." });
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) return res.json({ ok: true, deleted: 0 });
+  try {
+    const { list } = require("@vercel/blob");
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let cursor;
+    let deleted = 0;
+    for (let page = 0; page < 20; page++) {
+      const result = await list({ prefix: "media-uploader/incoming/", token, cursor, limit: 1000 });
+      const stale = result.blobs.filter((b) => new Date(b.uploadedAt).getTime() < cutoff).map((b) => b.url);
+      for (let i = 0; i < stale.length; i += 100) {
+        await del(stale.slice(i, i + 100), { token });
+      }
+      deleted += stale.length;
+      if (!result.hasMore) break;
+      cursor = result.cursor;
+    }
+    return res.json({ ok: true, deleted });
+  } catch (e) {
+    console.error("/api/cron/cleanup-blobs:", e);
+    return res.status(500).json({ error: e.message || "Cleanup failed." });
+  }
 });
 
 app.post("/api/admin/logout", (req, res) => {
@@ -612,7 +764,11 @@ app.post("/api/admin/settings", requireAdmin, async (req, res) => {
     ...payload,
     branding: { ...defaultSettings.branding, ...(payload.branding || {}) },
     destination: { ...defaultSettings.destination, ...(payload.destination || {}) },
-    projects: Array.isArray(payload.projects) ? payload.projects : currentSettings.projects || defaultSettings.projects
+    projects: Array.isArray(payload.projects) ? payload.projects : currentSettings.projects || defaultSettings.projects,
+    allowCustomProjects:
+      typeof payload.allowCustomProjects === "boolean"
+        ? payload.allowCustomProjects
+        : currentSettings.allowCustomProjects !== false
   };
   await writeSettings(nextSettings);
   const settings = await readSettings();
@@ -693,7 +849,9 @@ app.post("/api/upload/drive-session", express.json({ limit: "32kb" }), async (re
     }
 
     const name = (req.body?.name || "").trim();
-    const project = (req.body?.project || "").trim();
+    const project = resolveProjectName(settings, req.body?.project);
+    if (project === null) return res.status(400).json({ error: "Please choose a project from the list." });
+    if (!hasValidAccessCode(req.body?.accessCode)) return res.status(403).json({ error: ACCESS_CODE_ERROR });
     const originalFilename = ((req.body?.originalFilename || "").trim() || "upload.bin").slice(0, 240);
     const reportedMime = (req.body?.mimeType || "").trim();
     const uploadBatchId = (req.body?.uploadBatchId || "").trim();
@@ -757,10 +915,15 @@ app.post("/api/media/blob-client", express.json({ limit: "4mb" }), async (req, r
           throw new Error("Invalid upload payload.");
         }
         const uploaderName = (meta?.name || "").trim();
-        const project = (meta?.project || "").trim();
+        const project = resolveProjectName(settings, meta?.project);
         if (!uploaderName || !project) {
-          throw new Error("Name and project are required.");
+          throw new Error(project === null ? "Please choose a project from the list." : "Name and project are required.");
         }
+        if (!hasValidAccessCode(meta?.accessCode)) {
+          throw new Error(ACCESS_CODE_ERROR);
+        }
+        meta.project = project;
+        delete meta.accessCode;
         const prefix = "media-uploader/incoming/";
         if (!pathname || typeof pathname !== "string" || !pathname.startsWith(prefix)) {
           throw new Error("Invalid upload path.");
@@ -794,7 +957,9 @@ app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req,
     }
 
     const name = (req.body?.name || "").trim();
-    const project = (req.body?.project || "").trim();
+    const project = resolveProjectName(settings, req.body?.project);
+    if (project === null) return res.status(400).json({ error: "Please choose a project from the list." });
+    if (!hasValidAccessCode(req.body?.accessCode)) return res.status(403).json({ error: ACCESS_CODE_ERROR });
     const uploadBatchId = (req.body?.uploadBatchId || "").trim();
     const files = req.body?.files;
 
@@ -870,8 +1035,9 @@ app.post("/api/media/blob-commit", express.json({ limit: "512kb" }), async (req,
     }
 
     const timestamp = new Date().toISOString();
-    await appendSubmissionCsv({
+    await recordSubmission({
       timestamp,
+      project,
       name,
       city: "",
       destination: "google-drive",
@@ -900,7 +1066,9 @@ app.post("/api/upload/drive-log", express.json({ limit: "256kb" }), async (req, 
     }
 
     const name = (req.body?.name || "").trim();
-    const project = (req.body?.project || "").trim();
+    const project = resolveProjectName(settings, req.body?.project);
+    if (project === null) return res.status(400).json({ error: "Please choose a project from the list." });
+    if (!hasValidAccessCode(req.body?.accessCode)) return res.status(403).json({ error: ACCESS_CODE_ERROR });
     const files = req.body?.files;
 
     if (!name) return res.status(400).json({ error: "Your Name is required." });
@@ -918,8 +1086,9 @@ app.post("/api/upload/drive-log", express.json({ limit: "256kb" }), async (req, 
     const timestamp = new Date().toISOString();
     const projectFolderName = sanitizeDriveFolderName(project);
 
-    await appendSubmissionCsv({
+    await recordSubmission({
       timestamp,
+      project,
       name,
       city: "",
       destination: "google-drive",
@@ -945,7 +1114,9 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
     const settings = await readSettings();
     const files = req.files || [];
     const name = (req.body?.name || "").trim();
-    const project = (req.body?.project || "").trim();
+    const project = resolveProjectName(settings, req.body?.project);
+    if (project === null) return res.status(400).json({ error: "Please choose a project from the list." });
+    if (!hasValidAccessCode(req.body?.accessCode)) return res.status(403).json({ error: ACCESS_CODE_ERROR });
     const timestamp = new Date().toISOString();
     const safeName = sanitizePart(name) || "anon";
     const uploadToken = Date.now();
@@ -988,8 +1159,9 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
           });
         }
 
-        await appendSubmissionCsv({
+        await recordSubmission({
           timestamp,
+          project,
           name,
           city: "",
           destination: "google-drive",
@@ -1027,8 +1199,9 @@ app.post("/api/upload", upload.array("media", 10), async (req, res) => {
       };
     });
 
-    await appendSubmissionCsv({
+    await recordSubmission({
       timestamp,
+      project,
       name,
       city: "",
       destination: settings.destination.provider,

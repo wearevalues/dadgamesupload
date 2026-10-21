@@ -19,11 +19,40 @@ const projectCustomInput = document.getElementById("projectCustomInput");
 const nameInput = document.getElementById("nameInput");
 const iosMultiHint = document.getElementById("iosMultiHint");
 const pickerWaitLine = document.getElementById("pickerWaitLine");
+const accessCodeField = document.getElementById("accessCodeField");
+const accessCodeInput = document.getElementById("accessCodeInput");
+const doneState = document.getElementById("doneState");
+const doneTitle = document.getElementById("doneTitle");
+const doneDetail = document.getElementById("doneDetail");
+const uploadMoreBtn = document.getElementById("uploadMoreBtn");
 
 const customProjectValue = "__custom__";
 
 let selectedFiles = [];
 let settingsCache = null;
+/** Per-file upload state shown in the list: "uploading" | "done" | "failed". */
+const fileStatus = new Map();
+let isUploading = false;
+/** Sent with every upload request; checked server-side when UPLOAD_ACCESS_CODE is set. */
+let currentAccessCode = "";
+
+const STORAGE_KEYS = { name: "uploader:name", accessCode: "uploader:accessCode" };
+
+function readStored(key) {
+  try {
+    return window.localStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Private mode or blocked storage: remembering is a convenience only.
+  }
+}
 /** Next native picker session should append to selection (Add more). */
 let appendNextPick = false;
 
@@ -141,7 +170,7 @@ function applySiteMeta(settings) {
   }
 }
 
-function renderProjects(projects) {
+function renderProjects(projects, allowCustom = true) {
   const list = Array.isArray(projects) ? projects : [];
 
   projectSelect.innerHTML = "";
@@ -161,10 +190,12 @@ function renderProjects(projects) {
     projectSelect.appendChild(opt);
   });
 
-  const other = document.createElement("option");
-  other.value = customProjectValue;
-  other.textContent = "Other (type below)";
-  projectSelect.appendChild(other);
+  if (allowCustom || !list.length) {
+    const other = document.createElement("option");
+    other.value = customProjectValue;
+    other.textContent = "Other (type below)";
+    projectSelect.appendChild(other);
+  }
 
   syncProjectUI();
 }
@@ -187,7 +218,8 @@ async function loadSettings() {
     settingsCache = settings;
     applyBranding(settings);
     applySiteMeta(settings);
-    renderProjects(settings.projects);
+    renderProjects(settings.projects, settings.allowCustomProjects !== false);
+    if (settings.client?.requiresAccessCode) accessCodeField.classList.remove("hidden");
   } catch {
     settingsCache = null;
   }
@@ -327,9 +359,10 @@ async function uploadOneBatch(name, project, files, destSettings, ctx) {
   }
   return withRetry("uploading your files", async () => {
     const formData = new FormData();
-    files.forEach((file) => formData.append("media", file));
     formData.append("name", name);
     formData.append("project", project);
+    formData.append("accessCode", currentAccessCode);
+    files.forEach((file) => formData.append("media", file));
     const res = await fetch("/api/upload", { method: "POST", body: formData });
     const data = await parseApiJson(res);
     return { fileCount: data.fileCount, destination: data.destination };
@@ -386,9 +419,10 @@ async function shrinkImagesToFitVercelLimit(files, maxTotal) {
 async function uploadGoogleDriveViaServer(name, project, files) {
   return withRetry("uploading through the site", async () => {
     const formData = new FormData();
-    files.forEach((file) => formData.append("media", file));
     formData.append("name", name);
     formData.append("project", project);
+    formData.append("accessCode", currentAccessCode);
+    files.forEach((file) => formData.append("media", file));
     const res = await fetch("/api/upload", { method: "POST", body: formData });
     const data = await parseApiJson(res);
     return { fileCount: data.fileCount, destination: data.destination };
@@ -412,7 +446,8 @@ async function uploadDriveResumableDirect(name, project, files) {
         originalFilename: origName,
         mimeType: file.type || "",
         uploadBatchId,
-        fileIndex: i + 1
+        fileIndex: i + 1,
+        accessCode: currentAccessCode
       })
     });
     const sess = await parseApiJson(sessRes);
@@ -456,7 +491,7 @@ async function uploadDriveResumableDirect(name, project, files) {
   const logRes = await fetch("/api/upload/drive-log", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, project, files: uploadedMeta })
+    body: JSON.stringify({ name, project, files: uploadedMeta, accessCode: currentAccessCode })
   });
   await parseApiJson(logRes);
   return { fileCount: uploadedMeta.length, destination: "google-drive" };
@@ -484,7 +519,8 @@ async function uploadGoogleDriveViaBlob(name, project, files, uploadBatchId, sta
           name,
           project,
           originalFilename: orig,
-          fileIndex: fileNumber
+          fileIndex: fileNumber,
+          accessCode: currentAccessCode
         }),
         multipart: useMultipart
       }).catch((err) => {
@@ -502,6 +538,7 @@ async function uploadGoogleDriveViaBlob(name, project, files, uploadBatchId, sta
           name,
           project,
           uploadBatchId,
+          accessCode: currentAccessCode,
           files: [{ url: newBlob.url, originalFilename: orig, fileIndex: fileNumber }]
         })
       });
@@ -582,12 +619,68 @@ function renderPreview() {
     URL.revokeObjectURL(objectUrl);
   }
 
+  renderSelectedList();
+}
+
+const STATUS_LABELS = { uploading: "Uploading…", done: "Done", failed: "Failed" };
+
+function renderSelectedList() {
+  selectedList.innerHTML = "";
   selectedFiles.forEach((file) => {
+    const state = fileStatus.get(file);
     const item = document.createElement("li");
-    item.textContent = `${file.name} (${formatBytes(file.size)})`;
+    item.className = `file-row${state ? ` is-${state}` : ""}`;
+
+    const label = document.createElement("span");
+    label.className = "file-name";
+    label.textContent = `${file.name} (${formatBytes(file.size)})`;
+    item.appendChild(label);
+
+    if (state) {
+      const stateEl = document.createElement("span");
+      stateEl.className = "file-state";
+      stateEl.textContent = STATUS_LABELS[state] || "";
+      item.appendChild(stateEl);
+    }
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "file-remove-btn";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove ${file.name}`);
+    remove.disabled = isUploading;
+    remove.addEventListener("click", () => {
+      selectedFiles = selectedFiles.filter((f) => f !== file);
+      fileStatus.delete(file);
+      renderPreview();
+    });
+    item.appendChild(remove);
+
     selectedList.appendChild(item);
   });
 }
+
+function setFileStatus(file, state) {
+  fileStatus.set(file, state);
+  renderSelectedList();
+}
+
+function showDoneState(count, uploaderName) {
+  doneTitle.textContent = count === 1 ? "1 file uploaded" : `${count} files uploaded`;
+  doneDetail.textContent = `Thanks, ${uploaderName}! Everything made it.`;
+  form.classList.add("hidden");
+  doneState.classList.remove("hidden");
+  uploadMoreBtn.focus();
+}
+
+uploadMoreBtn.addEventListener("click", () => {
+  selectedFiles = [];
+  fileStatus.clear();
+  statusEl.textContent = "";
+  renderPreview();
+  doneState.classList.add("hidden");
+  form.classList.remove("hidden");
+});
 
 function setFiles(fileList) {
   const incoming = Array.from(fileList);
@@ -600,6 +693,7 @@ function setFiles(fileList) {
     return;
   }
   selectedFiles = validFiles;
+  fileStatus.clear();
   errorEl.textContent = "";
   renderPreview();
   mediaInput.value = "";
@@ -719,11 +813,32 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
+  const requiresCode = Boolean(settingsCache?.client?.requiresAccessCode);
+  currentAccessCode = requiresCode ? accessCodeInput.value.trim() : "";
+  if (requiresCode && !currentAccessCode) {
+    errorEl.textContent = "Please enter the access code.";
+    accessCodeInput.focus();
+    return;
+  }
+
+  writeStored(STORAGE_KEYS.name, name);
+  isUploading = true;
   setLoading(true);
   statusEl.textContent = "Uploading...";
   errorEl.textContent = "";
 
   try {
+    if (requiresCode) {
+      // Check once up front so a typo fails fast instead of on every file.
+      const res = await fetch("/api/upload/verify-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessCode: currentAccessCode })
+      });
+      await parseApiJson(res);
+      writeStored(STORAGE_KEYS.accessCode, currentAccessCode);
+    }
+
     const destSettings = await withRetry("starting the upload", fetchSettingsFresh);
     const queue = selectedFiles.slice();
     const total = queue.length;
@@ -735,6 +850,7 @@ form.addEventListener("submit", async (event) => {
     const failures = [];
 
     const uploadFile = async (file, index) => {
+      setFileStatus(file, "uploading");
       try {
         const data = await uploadOneBatch(name, project, [file], destSettings, {
           uploadBatchId,
@@ -743,8 +859,10 @@ form.addEventListener("submit", async (event) => {
         uploadedTotal += data.fileCount;
         lastDestination = data.destination;
         succeeded.add(file);
+        setFileStatus(file, "done");
       } catch (err) {
         failures.push({ file, message: err instanceof Error ? err.message : String(err) });
+        setFileStatus(file, "failed");
       } finally {
         doneCount += 1;
         statusEl.textContent = `Uploaded ${doneCount} of ${total}…`;
@@ -766,22 +884,25 @@ form.addEventListener("submit", async (event) => {
     // Keep only failed files selected so tapping Upload again never re-sends finished ones.
     if (failures.length) {
       selectedFiles = selectedFiles.filter((f) => !succeeded.has(f));
+      isUploading = false;
       renderPreview();
       errorEl.textContent = `${failures.length} of ${total} file(s) failed: ${failures[0].message} Tap Upload to retry just those.`;
       statusEl.textContent = uploadedTotal ? `Uploaded ${uploadedTotal} file(s) to ${lastDestination}.` : "";
     } else {
-      selectedFiles = [];
-      renderPreview();
-      statusEl.textContent = `Uploaded ${uploadedTotal} file(s) to ${lastDestination}.`;
+      showDoneState(uploadedTotal, name);
     }
   } catch (error) {
     errorEl.textContent = error instanceof Error ? error.message : "Upload failed.";
     statusEl.textContent = "";
   } finally {
+    isUploading = false;
     setLoading(false);
+    renderSelectedList();
   }
 });
 
 projectSelect.addEventListener("change", syncProjectUI);
+nameInput.value = readStored(STORAGE_KEYS.name);
+accessCodeInput.value = readStored(STORAGE_KEYS.accessCode);
 loadSettings();
 if (isIosDevice() && iosMultiHint) iosMultiHint.classList.remove("hidden");
